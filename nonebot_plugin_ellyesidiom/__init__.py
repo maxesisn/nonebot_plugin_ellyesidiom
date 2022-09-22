@@ -32,7 +32,7 @@ async def upload_image(data):
 
 @upload.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
-    image_url_list = []
+    image_url_list = list()
     caption = list()
     caption_text = str()
     for seg in args:
