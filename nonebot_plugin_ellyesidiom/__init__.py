@@ -17,13 +17,13 @@ tag_pat = re.compile(r"^#[^#]*$")
 upload = on_command("投稿", rule=to_me())
 
 
-# TDDO: wait for website to support upload
+# TODO: wait for website to support upload
 async def download_image(url):
     async with httpx.AsyncClient() as client:
         r = await client.get(url)
         return r.content
 
-# TDDO: wait for website to support upload
+# TODO: wait for website to support upload
 async def upload_image(data):
     async with httpx.AsyncClient() as client:
         r = await client.post("https://ellye.org/api/upload", data=data)
