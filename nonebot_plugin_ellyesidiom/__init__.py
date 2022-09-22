@@ -49,10 +49,10 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
                     text = text.replace("#", "")
                     if text != "":
                         caption.append(f"#{text}")
-            caption = list(set(caption))
-            caption_text = " ".join(caption)
-            if len(caption_text) > 100:
-                await upload.finish("标签过长。")
+    caption = list(set(caption))
+    caption_text = " ".join(caption)
+    if len(caption_text) > 100:
+        await upload.finish("标签过长。")
     sender_nickname = event.sender.nickname or event.sender.card or "匿名"
     sender_id = event.get_user_id()
     caption_text += f"\n投稿人：{sender_nickname}({sender_id})"
