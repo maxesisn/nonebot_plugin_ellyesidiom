@@ -82,7 +82,7 @@ async def ocr_text_analyze(ocr_result: list[dict]) -> list[dict]:
     return text_list
 
 
-async def get_ocr_text_local(image):
+async def get_ocr_text_local(image) -> list[str]:
     image = Image.open(BytesIO(image))
     ocr_temp_result = ocr.ocr(image)
     ocr_result = list[dict]

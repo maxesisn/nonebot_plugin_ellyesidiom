@@ -15,7 +15,7 @@ import httpx
 from .config import global_config
 from .data_source import delete_idiom_by_id, search_idiom, add_idiom, create_index, update_ocr_text
 from .storage import ei_img_storage_delete, ei_img_storage_upload, ei_img_storage_download
-from .ocr import get_ocr_text_qcloud
+from .ocr import get_ocr_text_qcloud, get_ocr_text_local
 
 tg_bot_token: str = global_config.tg_bot_token
 ei_upload_whitelist: list[str] = global_config.ei_upload_whitelist
@@ -32,14 +32,15 @@ get_ocr_result = on_command("OCR", rule=to_me())
 
 transport = httpx.AsyncHTTPTransport(retries=3)
 
+client = httpx.AsyncClient(transport=transport)
 
 async def download_image_from_qq(url):
-    async with httpx.AsyncClient(transport=transport) as client:
-        r = await client.get(url, timeout=10)
-        return r.content
+    r = await client.get(url, timeout=10)
+    return r.content
 
 
 async def upload_image(image_contents: list[bytes], caption: list[str], uploader_info: dict, under_review: bool):
+    print(len(image_contents))
     for image_content in image_contents:
         if len(image_content) > 10 * 1024 * 1024:
             continue
@@ -47,7 +48,10 @@ async def upload_image(image_contents: list[bytes], caption: list[str], uploader
         file_format = file_format.EXTENSION
         image_hash = xxh3_64_hexdigest(image_content)
         filename = f"{image_hash}.{file_format}"
-        ocr_result = await get_ocr_text_qcloud(image_content)
+        if not under_review:
+            ocr_result = await get_ocr_text_qcloud(image_content)
+        else:
+            ocr_result = await get_ocr_text_local(image_content)
         await ei_img_storage_upload(filename, image_content)
         # save bytes to local file
         with open(os.path.join(global_config.cache_dir, filename), "wb") as f:
@@ -93,8 +97,9 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         reply_msg = await bot.get_msg(message_id=event.reply.message_id)
         reply_image_url_list, reply_caption = await extract_upload(reply_msg["message"])
         image_url_list = image_url_list + reply_image_url_list
-    else:
-        print(event.reply)
+    reply_seg = MessageSegment.reply(event.message_id)
+    if len(image_url_list) == 0:
+        await upload.finish(reply_seg + "仅接受图片投稿。")
     caption = list(set(caption))
     caption_without_hash = list()
     for cap in caption:
@@ -108,11 +113,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     ei_under_review = False if sender_id in ei_upload_whitelist else True
     chat_id = "@ellyesidiom_review" if not ei_under_review else "-1001518240073"
     upload_ok_quote = "上传成功。" if not ei_under_review else "上传成功，请等待审核。"
-    reply_seg = MessageSegment.reply(event.message_id)
-    if len(image_url_list) == 0:
-        await upload.finish(reply_seg + "仅接受图片投稿。")
+    
     image_contents = await asyncio.gather(*[download_image_from_qq(url) for url in image_url_list])
-
     sender_info = {"nickname": sender_nickname,
                    "id": sender_id, "platform": "qq"}
     await upload_image(image_contents, caption_without_hash, sender_info, ei_under_review)
