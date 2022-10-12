@@ -13,9 +13,9 @@ from nonebot.log import logger
 import httpx
 
 from .config import global_config
-from .data_source import delete_idiom_by_id, search_idiom, add_idiom, create_index
+from .data_source import delete_idiom_by_id, search_idiom, add_idiom, create_index, update_ocr_text
 from .storage import ei_img_storage_delete, ei_img_storage_upload, ei_img_storage_download
-from .ocr import get_ocr_text
+from .ocr import get_ocr_text_qcloud
 
 tg_bot_token: str = global_config.tg_bot_token
 ei_upload_whitelist: list[str] = global_config.ei_upload_whitelist
@@ -27,6 +27,8 @@ search = on_command("查询", rule=to_me())
 delete = on_command("删除", rule=to_me())
 
 ei_import = on_command("导入", rule=to_me())
+update_ocr = on_command("更新OCR", rule=to_me())
+get_ocr_result = on_command("OCR", rule=to_me())
 
 transport = httpx.AsyncHTTPTransport(retries=3)
 
@@ -43,26 +45,34 @@ async def upload_image(image_contents: list[bytes], caption: list[str], uploader
             continue
         file_format = filetype.guess(image_content)
         file_format = file_format.EXTENSION
-        filename = f"{xxh3_64_hexdigest(image_content)}.{file_format}"
-
-        ocr_text = await get_ocr_text(image_content)
-        ocr_text_list = list()
-        for text in ocr_text:
-            ocr_text_list.append(text["text"])
-
-        #await ei_img_storage_upload(filename, image_content)
-        await add_idiom(tags=caption, filename=filename, ocr_text=ocr_text_list, uploader_info=uploader_info, under_review=under_review)
-        logger.info(f"Uploaded {filename} with caption {caption}")
-
+        image_hash = xxh3_64_hexdigest(image_content)
+        filename = f"{image_hash}.{file_format}"
+        ocr_result = await get_ocr_text_qcloud(image_content)
+        await ei_img_storage_upload(filename, image_content)
+        # save bytes to local file
+        with open(os.path.join(global_config.cache_dir, filename), "wb") as f:
+            f.write(image_content)
+        await add_idiom(tags=caption, image_hash=image_hash, image_ext=file_format, ocr_text=ocr_result, uploader_info=uploader_info, under_review=under_review)
+        if caption:
+            logger.info(f"Uploaded {image_hash} with tags {caption}")
+        else:
+            logger.info(f"Uploaded {image_hash} with ocr text {ocr_result}")
+    return filename
 
 async def extract_upload(args):
     image_url_list = list()
     caption = list()
     for seg in args:
-        if seg["type"] == "image":
-            image_url_list.append(seg["data"]["url"])
-        if seg["type"] == "text":
-            text: str = seg["data"]["text"]
+        if isinstance(seg, MessageSegment):
+            seg_type = seg.type
+            seg_data = seg.data
+        else:
+            seg_type = seg["type"]
+            seg_data = seg["data"]
+        if seg_type == "image":
+            image_url_list.append(seg_data["url"])
+        if seg_type == "text":
+            text: str = seg_data["text"]
             text.replace("＃", "#")
             text_list = text.strip().split()
             for text in text_list:
@@ -73,6 +83,7 @@ async def extract_upload(args):
                     if text != "":
                         caption.append(f"#{text}")
     return image_url_list, caption
+
 
 @upload.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
@@ -170,7 +181,8 @@ async def get_idiom_result(keyword: str, limit: int):
             result_text += "后续结果相关性差距过高，放弃输出。"
             break
         limit_count += 1
-        image_bytes = await ei_img_storage_download(res["_source"]["filename"])
+        filename = f"{res['_source']['image_hash']}.{res['_source']['image_ext']}"
+        image_bytes = await ei_img_storage_download(filename)
         result_text += MessageSegment.image(BytesIO(image_bytes))
         result_text += f"相关性：{res['_score']}\n"
         if len(res["_source"]["tags"]) > 0:
@@ -202,12 +214,37 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
         await ei_import.finish("您没有权限使用此命令。")
     await create_index()
-    filelist = os.listdir("/home/maxesisn/botData/ei_import")
+    filelist = os.listdir("/home/maxesisn/botData/ei_images")
     for file in filelist:
-        with open(f"/home/maxesisn/botData/ei_import/{file}", "rb") as f:
+        with open(f"/home/maxesisn/botData/ei_images/{file}", "rb") as f:
             print(f"Importing {file}")
-            await upload_image([f.read()], [], {"nickname": "Maxesisn", "id": "1763471048", "platform": "qq"}, False)
+            filename = await upload_image(image_contents=[f.read()], caption=[], uploader_info={"nickname": "欧式查理", "id": "269077688", "platform": "导入"}, under_review=False)
+            os.rename(f"/home/maxesisn/botData/ei_images/{file}", f"/home/maxesisn/botData/ei_images/{filename}")
 
+@update_ocr.handle()
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    if event.get_user_id() not in ei_upload_whitelist:
+        await update_ocr.finish("您没有权限使用此命令。")
+    filelist = os.listdir("/home/maxesisn/botData/ei_images")
+    for file in filelist:
+        filename_without_ext = file.split(".")[0]
+        with open(f"/home/maxesisn/botData/ei_images/{file}", "rb") as f:
+            print(f"Updating {file}")
+            ocr_text = await get_ocr_text_qcloud(f.read())
+            await update_ocr_text(filename_without_ext, ocr_text)
+
+@get_ocr_result.handle()
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    if event.get_user_id() not in ei_upload_whitelist:
+        await get_ocr_result.finish("您没有权限使用此命令。")
+    req_hash = str(args)
+    for file in os.listdir("/home/maxesisn/botData/ei_images"):
+        if file.startswith(req_hash):
+            with open(f"/home/maxesisn/botData/ei_images/{file}", "rb") as f:
+                image_bytes = f.read()
+                ocr_text = await get_ocr_text_qcloud(image_bytes)
+                await get_ocr_result.finish()
+            
 @delete.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:

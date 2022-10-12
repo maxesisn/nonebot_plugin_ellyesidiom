@@ -36,10 +36,11 @@ async def search_idiom(query_str: str) -> dict:
     )
 
 
-async def add_idiom(tags: list[str], filename: str, ocr_text: list[str], uploader_info: dict, under_review: bool) -> dict:
+async def add_idiom(tags: list[str], image_hash: str, image_ext:str, ocr_text: list[str], uploader_info: dict, under_review: bool) -> dict:
     body = {
         "tags": tags,
-        "filename": filename,
+        "image_hash": image_hash,
+        "image_ext": image_ext,
         "ocr_text": ocr_text,
         "uploader": uploader_info,
         "under_review": under_review
@@ -61,7 +62,10 @@ async def create_index():
                     "analyzer": "ik_max_word",
                     "search_analyzer": "ik_smart"
                 },
-                "filename": {
+                "image_hash": {
+                    "type": "keyword"
+                },
+                "image_ext": {
                     "type": "keyword"
                 },
                 "ocr_text": {
@@ -91,3 +95,21 @@ async def create_index():
             }
         }
     })
+
+# update text_ocr field in index by image_hash index
+async def update_ocr_text(image_hash: str, ocr_text: list[str]) -> dict:
+    return es.update_by_query(index=es_index, body={
+        "query": {
+            "match": {
+                "image_hash": image_hash
+            }
+        },
+        "script": {
+            "source": "ctx._source.ocr_text = params.ocr_text",
+            "lang": "painless",
+            "params": {
+                "ocr_text": ocr_text
+            }
+        }
+    })
+    
