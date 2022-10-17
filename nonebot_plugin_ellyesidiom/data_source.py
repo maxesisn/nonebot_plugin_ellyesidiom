@@ -1,7 +1,7 @@
 from elasticsearch import Elasticsearch
 from numpy import indices
 
-from .config import global_config
+from .utils import global_config
 
 es_scheme = "http"
 es_host: str = global_config.es_host
@@ -22,7 +22,7 @@ async def search_idiom(query_str: str) -> dict:
                 "must": {
                     "multi_match": {
                         "query": query_str,
-                        "fields": ["tags^2", "ocr_text"]
+                        "fields": ["tags^40", "ocr_text"]
                     }
                 },
                 "must_not": {
@@ -113,3 +113,97 @@ async def update_ocr_text(image_hash: str, ocr_text: list[str]) -> dict:
         }
     })
     
+async def count_under_review() -> int:
+    return es.count(index=es_index, body={
+        "query": {
+            "match": {
+                "under_review": True
+            }
+        }
+    })["count"]
+
+async def count_reviewed() -> int:
+    return es.count(index=es_index, body={
+        "query": {
+            "match": {
+                "under_review": False
+            }
+        }
+    })["count"]
+
+async def add_tags_by_hash(id: str, tags: list[str]) -> dict:
+    return es.update_by_query(index=es_index, body={
+        "query": {
+            "term": {
+                "image_hash": id
+            }
+        },
+        "script": {
+            "source": "ctx._source.tags.addAll(params.tags)",
+            "lang": "painless",
+            "params": {
+                "tags": tags
+            }
+        }
+    })
+
+async def get_id_by_image_hash(image_hash: str) -> str:
+    return es.search(index=es_index, body={
+        "query": {
+            "term": {
+                "image_hash": image_hash
+            }
+        }
+    })["hits"]["hits"][0]["_id"]
+
+async def get_ext_by_image_hash(image_hash: str) -> str:
+    return es.search(index=es_index, body={
+        "query": {
+            "term": {
+                "image_hash": image_hash
+            }
+        }
+    })["hits"]["hits"][0]["_source"]["image_ext"]
+
+async def check_image_hash_exists(image_hash: str) -> bool:
+    return es.count(index=es_index, body={
+        "query": {
+            "term": {
+                "image_hash": image_hash
+            }
+        }
+    })["count"] > 0
+
+async def update_review_status_by_image_hash(image_hash: str, under_review: bool) -> dict:
+    return es.update_by_query(index=es_index, body={
+        "query": {
+            "term": {
+                "image_hash": image_hash
+            }
+        },
+        "script": {
+            "source": "ctx._source.under_review = params.under_review",
+            "lang": "painless",
+            "params": {
+                "under_review": under_review
+            }
+        }
+    })
+
+async def get_review_status_by_image_hash(image_hash: str) -> bool:
+    return es.search(index=es_index, body={
+        "query": {
+            "term": {
+                "image_hash": image_hash
+            }
+        }
+    })["hits"]["hits"][0]["_source"]["under_review"]
+
+async def get_under_review_idioms() -> list[dict]:
+    return es.search(index=es_index, body={
+        "query": {
+            "match": {
+                "under_review": True
+            }
+        }
+    })["hits"]["hits"]
