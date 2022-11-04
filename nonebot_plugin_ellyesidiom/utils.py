@@ -1,9 +1,10 @@
 import base64
 import math
 from nonebot import get_driver
-import PIL
+import pytz
 
 global_config = get_driver().config
+shanghai_tz = pytz.timezone('Asia/Shanghai')
 
 # base16 to base32
 async def base16_to_base32(base16: str) -> str:

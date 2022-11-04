@@ -2,12 +2,12 @@ import base64
 import re
 import json
 from cnocr import CnOcr
-from numpy import mat
 from tencentcloud.common import credential
 from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 from tencentcloud.ocr.v20181119 import ocr_client, models
 from io import BytesIO
 from PIL import Image
+from nonebot.log import logger
 
 from .utils import global_config
 
@@ -28,9 +28,9 @@ logging.config.dictConfig({
 ocr = CnOcr(det_model_name="db_resnet34", rec_model_name="densenet_lite_136-gru") 
 
 async def clean_ocr_text(ocr_text: list[dict]) -> list[dict]:
-    text_blacklist_partial = ["问怡宝一律", "问怡宝回答是", "问怡宝绿帽", "Hoshino", "星乃花园#", "人在线", "相亲相爱", "怡讯大厦", "3番灵装"]
-    text_blacklist_fullmatch = ["发送", "取消"]
-    text_blacklist_regex = [r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", "Hoshino(.*)花园"]
+    text_blacklist_partial = ["问怡宝一律", "问怡宝回答是", "问怡宝绿帽", "Hoshino", "星乃花园#", "人在线", "相亲相爱", "怡讯大厦", "番灵装", "星乃4.5群之"]
+    text_blacklist_fullmatch = ["发送", "取消", "<返回"]
+    text_blacklist_regex = [r"^(上午|下午)?([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", "Hoshino(.*)花园", "^LV(.*)?(群主|管理员)$"]
     cleaned_ocr_text = list()
     for i in ocr_text:
         if any(blacklisted_text in i["text"] for blacklisted_text in text_blacklist_partial):
@@ -42,7 +42,7 @@ async def clean_ocr_text(ocr_text: list[dict]) -> list[dict]:
         if len(i["text"]) == 1:
             print("Single character:", i["text"])
             continue
-        if any(re.match(regex, i["text"]) for regex in text_blacklist_regex):
+        if any(re.match(regex, i["text"], re.IGNORECASE) for regex in text_blacklist_regex):
             print("Regex match:", i["text"])
             continue
         cleaned_ocr_text.append(i)
@@ -69,6 +69,8 @@ async def ocr_text_analyze(ocr_result: list[dict]) -> list[dict]:
         text_height_gap_list.append(text_height_list[i + 1] - text_height_list[i])
     text_height_gap_list.sort()
     print(text_height_list)
+    if len(text_height_list) == 0:
+        return None
     text_height_average = sum(text_height_list) / len(text_height_list)
     text_height_average = text_height_average
     print("Average height:", text_height_average)
@@ -96,9 +98,12 @@ async def get_ocr_text_local(image) -> list[str]:
     ocr_result = await clean_ocr_text(ocr_result)
     print(ocr_result)
     filtered_ocr_text = await ocr_text_analyze(ocr_result)
-    print(filtered_ocr_text)
-    filtered_ocr_text = [i["text"] for i in filtered_ocr_text]
-    return filtered_ocr_text
+    if filtered_ocr_text:
+        print(filtered_ocr_text)
+        filtered_ocr_text = [i["text"] for i in filtered_ocr_text]
+        return filtered_ocr_text
+    else:
+        return None
 
 async def get_ocr_text_qcloud_basic(image) -> list[str]:
     image = base64.b64encode(image).decode()
@@ -121,11 +126,14 @@ async def get_ocr_text_qcloud_basic(image) -> list[str]:
         ocr_result.append(temp_dict)
     print("raw:", ocr_result)
     ocr_result =  await ocr_text_analyze(ocr_result)
-    print("analyzed:", ocr_result)
-    filtered_ocr_text = await clean_ocr_text(ocr_result)
-    print("filtered:", filtered_ocr_text)
-    filtered_ocr_text = [i["text"] for i in filtered_ocr_text]
-    return filtered_ocr_text
+    if ocr_result:
+        print("analyzed:", ocr_result)
+        filtered_ocr_text = await clean_ocr_text(ocr_result)
+        print("filtered:", filtered_ocr_text)
+        filtered_ocr_text = [i["text"] for i in filtered_ocr_text]
+        return filtered_ocr_text
+    else:
+        return None
 
 async def get_ocr_text_qcloud_accurate(image) -> list[str]:
     image = base64.b64encode(image).decode()
@@ -148,15 +156,23 @@ async def get_ocr_text_qcloud_accurate(image) -> list[str]:
         ocr_result.append(temp_dict)
     print("raw:", ocr_result)
     ocr_result =  await ocr_text_analyze(ocr_result)
-    print("analyzed:", ocr_result)
-    filtered_ocr_text = await clean_ocr_text(ocr_result)
-    print("filtered:", filtered_ocr_text)
-    filtered_ocr_text = [i["text"] for i in filtered_ocr_text]
-    return filtered_ocr_text
+    if ocr_result:
+        print("analyzed:", ocr_result)
+        filtered_ocr_text = await clean_ocr_text(ocr_result)
+        print("filtered:", filtered_ocr_text)
+        filtered_ocr_text = [i["text"] for i in filtered_ocr_text]
+        return filtered_ocr_text
+    else:
+        return None
 
-async def get_ocr_text_cloud(image) -> list[str]:
+async def get_ocr_text_cloud(image: bytes) -> list[str]:
     match cloud_ocr_method:
         case "qcloud_accurate":
+            logger.debug("Using QCloud accurate OCR.")
             return await get_ocr_text_qcloud_accurate(image)
+        case "qcloud_basic":
+            logger.debug("Using QCloud basic OCR.")
+            return await get_ocr_text_qcloud_basic(image)
         case _:
+            logger.debug("Using default (QCloud basic OCR).")
             return await get_ocr_text_qcloud_basic(image)
