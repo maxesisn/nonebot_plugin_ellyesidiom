@@ -9,7 +9,7 @@ from io import BytesIO
 from PIL import Image
 from nonebot.log import logger
 
-from .utils import global_config
+from .consts import global_config
 
 qcloud_api_sid = global_config.qcloud_api_sid
 qcloud_api_skey = global_config.qcloud_api_skey
@@ -18,14 +18,14 @@ cloud_ocr_method = global_config.cloud_ocr_method
 qcloud_cred = credential.Credential(qcloud_api_sid, qcloud_api_skey)
 qcloud_ocr_client = ocr_client.OcrClient(qcloud_cred, "ap-beijing")
 
-import logging.config
-logging.config.dictConfig({
-    'version': 1,
-    'disable_existing_loggers': True,
-})
+# import logging.config
+# logging.config.dictConfig({
+#     'version': 1,
+#     'disable_existing_loggers': True,
+# })
 
 
-ocr = CnOcr(det_model_name="db_resnet34", rec_model_name="densenet_lite_136-gru") 
+ocr = CnOcr(det_model_name="db_resnet34", rec_model_name="densenet_lite_136-gru", det_model_backend="pytorch", rec_model_backend="pytorch")
 
 async def clean_ocr_text(ocr_text: list[dict]) -> list[dict]:
     text_blacklist_partial = ["问怡宝一律", "问怡宝回答是", "问怡宝绿帽", "Hoshino", "星乃花园#", "人在线", "相亲相爱", "怡讯大厦", "番灵装", "星乃4.5群之"]

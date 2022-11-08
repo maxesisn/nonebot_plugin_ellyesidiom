@@ -1,7 +1,7 @@
 import datetime
 from pymongo import MongoClient
 
-from .utils import shanghai_tz, global_config
+from .consts import shanghai_tz, global_config
 
 from bson.codec_options import CodecOptions
 
@@ -92,3 +92,6 @@ async def get_catalogue_by_image_hash(image_hash: str) -> list[str]:
 
 async def get_comment_by_image_hash(image_hash: str) -> list[str]:
     return idioms_data.find_one({"image_hash": image_hash})["comment"]
+
+async def get_latest_25() -> list[dict]:
+    return idioms_data.find().sort("timestamp", -1).limit(25)

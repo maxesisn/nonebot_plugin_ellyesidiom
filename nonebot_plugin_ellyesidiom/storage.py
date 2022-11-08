@@ -5,7 +5,7 @@ from qcloud_cos import CosS3Client
 from qcloud_cos import CosServiceError
 from qcloud_cos import CosClientError
 
-from .utils import global_config
+from .consts import global_config
 
 ei_img_storage_bucket = global_config.ei_img_storage_bucket
 ei_img_storage_region = global_config.ei_img_storage_region

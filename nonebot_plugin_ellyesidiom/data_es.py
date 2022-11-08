@@ -2,7 +2,7 @@ from elasticsearch import Elasticsearch
 from numpy import indices
 from sympy import true
 
-from .utils import global_config
+from .consts import global_config
 
 es_scheme = "http"
 es_host: str = global_config.es_host
