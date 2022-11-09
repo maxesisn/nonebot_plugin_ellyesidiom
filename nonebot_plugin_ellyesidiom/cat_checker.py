@@ -1,4 +1,3 @@
-# ptcp stands for Participants
 import fuzzywuzzy.process as fuzz
 
 core_ep = {
