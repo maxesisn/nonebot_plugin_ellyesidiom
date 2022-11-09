@@ -6,6 +6,7 @@ from .data_es import search_idiom
 from fastapi import FastAPI, APIRouter
 from fastapi.responses import JSONResponse
 from nonebot import get_app
+from nonebot.log import logger
 
 app: FastAPI = get_app()
 
@@ -76,3 +77,4 @@ async def search(keyword: str):
     return JSONResponse(payload)
 
 app.include_router(router)
+logger.info("EllyeHub API Server Started")
