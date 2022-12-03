@@ -315,7 +315,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     idiom_list = await get_under_review_idioms()
     result = ""
     for idiom in idiom_list:
-        result += f"hash: {idiom['image_hash']} tags:{idiom['tags']} ocr:{idiom['ocr_text']} cat:{idiom['catalogue']} com:{idiom['comment']}"
+        result += f"hash: {idiom['image_hash']} tags:{idiom['tags']} cat:{idiom['catalogue']} com:{idiom['comment']}"
         result += MessageSegment.image(await ei_img_storage_download(f"{idiom['image_hash']}.{idiom['image_ext']}"))
         result += "\n-----------\n"
     if result == "":

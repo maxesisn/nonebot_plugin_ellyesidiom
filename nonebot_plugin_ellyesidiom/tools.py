@@ -77,9 +77,20 @@ async def ei_argparser(message: Message | list) -> dict:
     if isinstance(message, Message):
         for seg in message:
             if seg.type == "text":
-                pure_text.append(seg.data["text"].replace("＃", "#").replace("＝", "="))
+                pure_text.append(seg.data["text"]
+                .replace("＃", "#")
+                .replace("＝", "=")
+                .replace("，", ",")
+                .replace(", ", ",")
+            )
     else:
-        pure_text = message
+        if isinstance(message[0], str):
+            pure_text = message
+        else:
+            for seg in message:
+                if seg["type"] == "text":
+                    pure_text.append(seg["data"]["text"].replace("＃", "#").replace("＝", "="))
+        
     
     pure_text = " ".join(pure_text).split()
 
@@ -89,6 +100,14 @@ async def ei_argparser(message: Message | list) -> dict:
 
     iter_pure_text = previous_and_current_and_next_and_nextnext(pure_text)
     
+    def process_argv(argv:str) -> list:
+        if "=" in argv:
+            argv = argv.split("=", 1)[1]
+        if "," in argv:
+            return argv.split(",")
+        else:
+            return [argv]
+
     for previous_arg, arg, next_arg, nextnext_arg in iter_pure_text:
         print(f"1.current result: {arg_result}")
         print(f"2.previous_arg: {previous_arg}, arg: {arg}, next_arg: {next_arg}, nextnext_arg: {nextnext_arg}")
@@ -103,14 +122,14 @@ async def ei_argparser(message: Message | list) -> dict:
                             if "=" == next_arg: # 淦其实只有一个等于号，但可能和下下个参数组合起来是完整的参数表达式
                                 if nextnext_arg : # 有下下个参数
                                     arg = arg + next_arg + nextnext_arg # 肯定是完整的参数表达式了
-                                    arg_result[k].append(arg.split("=", 1)[1])
+                                    arg_result[k].extend(process_argv(arg))
                                     is_arg = True
                                     next(iter_pure_text) # 跳到下下下个参数
                                     next(iter_pure_text)
                                     break
                             else: # 肯定是完整的参数表达式了
                                 arg = arg + next_arg 
-                                arg_result[k].append(arg.split("=", 1)[1])
+                                arg_result[k].extend(process_argv(arg))
                                 is_arg = True
                                 next(iter_pure_text) # 跳到下下个参数
                                 break
@@ -120,7 +139,7 @@ async def ei_argparser(message: Message | list) -> dict:
                         print(f"有等于号，但是等于号在最后，肯定不是完整的参数表达式 {arg}")
                         if next_arg: # 有下一个参数
                             arg = arg + next_arg
-                            arg_result[k].append(arg.split("=", 1)[1])
+                            arg_result[k].extend(process_argv(arg))
                             is_arg = True
                             next(iter_pure_text)
                             break
@@ -130,25 +149,21 @@ async def ei_argparser(message: Message | list) -> dict:
                         print(f"构成完整的参数表达式 {arg}")
                         argv = arg.split("=", 1)[1]
                         if not argv: # 但是没有参数值
-                            arg_result["tag"].append(arg)
+                            arg_result[k].extend(process_argv(arg))
                         else:
-                            arg_result[k].append(argv)
+                            arg_result[k].extend(process_argv(argv))
                         is_arg = True
                     break    
                 except IndexError: # 误会了，不是参数表达式
-                    arg_result["tag"].append(arg)
+                    arg_result[k].extend(process_argv(arg))
                     is_arg = False
                     break
             else: # 不是参数表达式
                 print(f"对于{v=} 不是参数表达式 {arg}")
             
         if not is_arg:
-            arg_result["tag"].append(arg)
+            arg_result["tag"].extend(process_argv(arg))
         is_arg = False
-
-    # deduplicate
-    for k, v in arg_result.items():
-        arg_result[k] = list(set(v))
 
     cat_id_list = list()
     no_cat_id_list = list()
@@ -166,6 +181,10 @@ async def ei_argparser(message: Message | list) -> dict:
     arg_result["cat"] = cat_id_list
     arg_result["no_cat"] = no_cat_id_list
 
+    # deduplicate
+    for k, v in arg_result.items():
+        arg_result[k] = list(set(v))
+    print(f"3.result: {arg_result}")
 
     return arg_result
 
