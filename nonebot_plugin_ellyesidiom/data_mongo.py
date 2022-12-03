@@ -15,8 +15,10 @@ mongo_pass = global_config.mongo_pass
 client = MongoClient(f'mongodb://{mongo_user}:{mongo_pass}@{mongo_host}:27017/')
 
 ei_data = client.ei_data
+me_data = client.me_data
 
 idioms_data = ei_data.idioms.with_options(codec_options=codec_opt)
+cards_data = me_data.cards.with_options(codec_options=codec_opt)
 
 async def get_idiom_by_image_hash(image_hash: str) -> dict:
     return idioms_data.find_one({"image_hash": image_hash})
@@ -76,7 +78,7 @@ async def get_review_status_by_image_hash(image_hash: str) -> bool:
     return idioms_data.find_one({"image_hash": image_hash})["under_review"]
 
 async def get_under_review_idioms() -> list[dict]:
-    return idioms_data.find({"under_review": True})
+    return idioms_data.find({"under_review": True}).limit(10)
 
 async def check_ocr_text_exists(ocr_text: list[str]) -> bool:
     return idioms_data.count_documents({"ocr_text": ocr_text}) > 0
@@ -95,3 +97,45 @@ async def get_comment_by_image_hash(image_hash: str) -> list[str]:
 
 async def get_latest_25() -> list[dict]:
     return idioms_data.find().sort("timestamp", -1).limit(25)
+
+
+async def get_full_hash_by_prefix(prefix: str) -> list[str] | None:
+    hash_counts = idioms_data.count_documents({"image_hash": {"$regex": f"^{prefix}"}})
+    if hash_counts == 0:
+        return None
+    elif hash_counts == 1:
+        return [idioms_data.find_one({"image_hash": {"$regex": f"^{prefix}"}})["image_hash"]]
+    else:
+        result = []
+        all_hashes = idioms_data.find({"image_hash": {"$regex": f"^{prefix}"}})
+        for hash in all_hashes:
+            result.append(hash["image_hash"])
+        return result
+
+# get uploader nickname rank and exclude under_review idioms and platform is not qq
+async def get_uploader_rank() -> list[dict]:
+    return idioms_data.aggregate([
+        {"$match": {"under_review": False, "uploader.platform": {"$eq": "qq"}}},
+        {"$group": {"_id": "$uploader.id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}}
+    ])
+
+
+async def get_gm_info(user_id):
+    user_id = str(user_id)
+    result: dict = cards_data.find_one({'id': user_id})
+    card: str = result['card'] if result else None
+    print(f"{user_id=} {card=}")
+    return card
+
+async def set_gm_info(user_id, gm_info):
+    user_id = str(user_id)
+    result = cards_data.update_one(
+        {'id': user_id},
+        {'$set': {'card': gm_info}},
+        upsert=True
+    )
+    return result.modified_count
+
+async def get_random_idiom() -> dict:
+    return idioms_data.aggregate([{"$sample": {"size": 1}}]).next()

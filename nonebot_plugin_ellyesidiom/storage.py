@@ -82,4 +82,7 @@ async def ei_img_storage_delete(filename:str):
         print(e.get_error_code())
         print(e.get_error_msg())
         return False
+    filelist = os.listdir(cache_dir)
+    if filename in filelist:
+        os.remove(os.path.join(cache_dir, filename))
     return response

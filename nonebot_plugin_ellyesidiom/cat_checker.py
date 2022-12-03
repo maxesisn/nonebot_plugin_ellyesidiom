@@ -8,6 +8,8 @@ core_ep = {
     "latte": "562978277",
     "coffee": "438971718",
     "rikka": "779634201",
+    "sayyiku": "2158901807",
+    "32yy": "2366679528",
     "meals": "meals"
 }
 
@@ -19,10 +21,12 @@ ep_alias = {
     "latte": ["拿铁", "拿铁麻麻"],
     "coffee": ["咖啡"],
     "rikka": ["六花"],
+    "sayyiku": ["sa", "sa酱"],
+    "32yy": ["32yy", "善恶歪歪"],
     "meals": ["怡宴"]
 }
 
-async def ep_alias_to_id(name: str) -> str:
+async def ep_alias_to_id(name: str) -> str | None:
     for ep, alias in ep_alias.items():
         if name in alias:
             return core_ep[ep]
@@ -30,7 +34,7 @@ async def ep_alias_to_id(name: str) -> str:
             return core_ep[ep]
     return None
 
-async def id_to_ep_alias(id: str) -> str:
+async def id_to_ep_alias(id: str) -> str | None:
     for ep, ep_id in core_ep.items():
         if id == ep_id:
             return ep_alias[ep][0]

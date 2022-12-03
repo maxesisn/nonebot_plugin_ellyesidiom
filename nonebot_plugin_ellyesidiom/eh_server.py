@@ -1,12 +1,16 @@
 from .data_mongo import get_latest_25, get_idiom_by_image_hash
+from .data_mongo import get_under_review_idioms
 from .cat_checker import id_to_ep_alias
 from .data_es import search_idiom
-
+from .consts import global_config
 
 from fastapi import FastAPI, APIRouter
 from fastapi.responses import JSONResponse
 from nonebot import get_app
 from nonebot.log import logger
+
+ei_img_storage_bucket = global_config.ei_img_storage_bucket
+ei_img_storage_region = global_config.ei_img_storage_region
 
 app: FastAPI = get_app()
 
@@ -31,7 +35,7 @@ async def index():
         subtitle_str = f"备注:{com_str} 分类:{cat_name}"
         temp_dict["subtitle"] = subtitle_str
         image_url = data["image_hash"] + "." + data["image_ext"]
-        image_url = "https://ellyes-word-1251992512.cos.ap-shanghai.myqcloud.com/" + image_url
+        image_url = f"https://{ei_img_storage_bucket}.cos.{ei_img_storage_region}.myqcloud.com/" + image_url
         temp_dict["img"] = image_url
         payload.append(temp_dict)
     return JSONResponse(payload)
@@ -70,11 +74,34 @@ async def search(keyword: str):
         subtitle_str = f"备注:{com_str} 分类:{cat_name}"
         temp_dict["subtitle"] = subtitle_str
         image_url = data["image_hash"] + "." + data["image_ext"]
-        image_url = "https://ellyes-word-1251992512.cos.ap-shanghai.myqcloud.com/" + image_url
+        image_url = f"https://{ei_img_storage_bucket}.cos.{ei_img_storage_region}.myqcloud.com/" + image_url
         temp_dict["img"] = image_url
         payload.append(temp_dict)
     print(payload)
     return JSONResponse(payload)
+
+@router.post("/api/admin_auth")
+async def admin_auth():
+    return JSONResponse({"status": "ok"})
+
+@router.get("/api/is_admin")
+async def is_admin():
+    return JSONResponse({"status": "ok"})
+
+@router.get("/api/get_review_list")
+async def get_review_list():
+    data = await get_under_review_idioms()
+    payload = []
+    for d in data:
+        temp_dict = {}
+        temp_dict["img"] = f"https://{ei_img_storage_bucket}.cos.{ei_img_storage_region}.myqcloud.com/" + d["image_hash"] + "." + d["image_ext"]
+        temp_dict["tags"] = d["tags"]
+        temp_dict["comment"] = d["comment"]
+        temp_dict["catalogue"] = d["catalogue"]
+        payload.append(temp_dict)
+    return JSONResponse(payload)
+
+    
 
 app.include_router(router)
 logger.info("EllyeHub API Server Started")

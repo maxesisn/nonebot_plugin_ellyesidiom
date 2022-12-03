@@ -1,28 +1,33 @@
-import base64
-import math
 import os
 import re
 from io import BytesIO
 
-import binascii
 import filetype
 import httpx
 from xxhash import xxh3_64_hexdigest
-from nonebot.adapters.onebot.v11 import MessageSegment
+from nonebot import get_bots
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
+from nonebot.adapters.onebot.v11.exception import ActionFailed
+from itertools import tee, islice, chain
 from nonebot.log import logger
 
 from .data_es import search_idiom as es_search_idiom, add_idiom as es_add_idiom
 from .data_mongo import get_catalogue_by_image_hash, get_comment_by_image_hash, get_idiom_by_catalogue, get_idiom_by_comment, add_idiom
 from .data_mongo import check_image_hash_exists, check_ocr_text_exists
 from .data_mongo import get_idiom_by_image_hash
+from .data_mongo import get_full_hash_by_prefix
+from .data_mongo import get_gm_info, set_gm_info
 from .storage import ei_img_storage_upload, ei_img_storage_download
 from .ocr import get_ocr_text_cloud, get_ocr_text_local
 from .cat_checker import ep_alias_to_id, id_to_ep_alias
+from .exceptions import HashPrefixNotFoundError, HashPrefixConflictError
 
 
 from .data_mongo import check_image_hash_exists
 
 from .consts import global_config, shanghai_tz
+
+ellye_gid = global_config.ellye_gid
 
 
 transport = httpx.AsyncHTTPTransport(retries=3)
@@ -30,74 +35,139 @@ client = httpx.AsyncClient(transport=transport)
 tg_bot_token: str = global_config.tg_bot_token
 tag_pat = re.compile(r"^#[^#]*$")
 
-# base16 to base32
 
+async def hash_shortener(base16_str: str) -> str:
+    return base16_str[:6].upper()
 
-async def base16_to_base32(base16: str) -> str:
-    return base64.b32encode(bytearray.fromhex(base16)).decode('utf-8').replace('=', '')
+async def hash_extender(base16_str: str, gid: str) -> str:
+    base16_str = base16_str.lower()
+    hash_list = await get_full_hash_by_prefix(base16_str)
+    if hash_list is None:
+        raise HashPrefixNotFoundError(base16_str, gid)
+    if len(hash_list) == 1:
+        return hash_list[0]
+    else:
+        raise HashPrefixConflictError(base16_str, hash_list, gid)
 
-
-async def base32_to_base16(base32: str) -> str:
-    pad_length = math.ceil(len(base32) / 8) * 8 - len(base32)
-    base32 = base32 + '=' * pad_length
-    return base64.b32decode(base32).hex()
 
 
 async def download_image_from_qq(url):
     r = await client.get(url, timeout=10)
     return r.content
 
+# solution from https://stackoverflow.com/questions/1011938/loop-that-also-accesses-previous-and-next-values
 
-async def any_to_base16(bxx_str):
-    try:
-        base16 = await base32_to_base16(bxx_str)
-    except binascii.Error:
-        base16 = bxx_str
-    return base16
+def previous_and_current_and_next_and_nextnext(some_iterable):
+    prevs, items, nexts, nextnexts = tee(some_iterable, 4)
+    prevs = chain([None], prevs)
+    nexts = chain(islice(nexts, 1, None), [None])
+    nextnexts = chain(islice(nextnexts, 2, None), [None, None])
+    return zip(prevs, items, nexts, nextnexts)
 
 
-async def ei_argparser(args: list[str]) -> dict:
-    include_comment_list = list()
-    exclude_comment_list = list()
-    include_catalogue_list = list()
-    exclude_catalogue_list = list()
-    ready_to_removed = list()
-    for arg in args:
-        if isinstance(arg, MessageSegment):
-            arg_type = arg.type
-            arg_data = arg.data
-        else:
-            arg_type = arg["type"]
-            arg_data = arg["data"]
-        arg_copy = arg
-        arg_copy = arg_copy.replace("，", ",").replace(
-            "＝", "=").replace("：", ":").replace(" ", "")
-        match arg_copy[:4]:
-            case "com=" | "com:":
-                include_comment_list.append(arg_copy[4:])
-                ready_to_removed.append(arg)
-            case "com!":
-                if arg_copy[4] == "=":
-                    exclude_comment_list.append(arg_copy[5:])
-                    ready_to_removed.append(arg)
-            case "cat=" | "cat:":
-                include_catalogue_list.append(arg_copy[4:])
-                ready_to_removed.append(arg)
-            case "cat!":
-                if arg_copy[4] == "=":
-                    exclude_catalogue_list.append(arg_copy[5:])
-                    ready_to_removed.append(arg)
-    for arg in ready_to_removed:
-        args.remove(arg)
-
-    return {
-        "processed_args": args,
-        "include_comment_list": include_comment_list,
-        "exclude_comment_list": exclude_comment_list,
-        "include_catalogue_list": include_catalogue_list,
-        "exclude_catalogue_list": exclude_catalogue_list
+async def ei_argparser(message: Message | list) -> dict:
+    arg_template = {
+        "cat": ["cat", "cats", "category", "categories", "分类"],
+        "tag": ["tag", "tags", "标签"],
+        "com": ["com", "comment", "comments", "注释", "备注"],
     }
 
+    pure_text = list()
+
+    if isinstance(message, Message):
+        for seg in message:
+            if seg.type == "text":
+                pure_text.append(seg.data["text"].replace("＃", "#").replace("＝", "="))
+    else:
+        pure_text = message
+    
+    pure_text = " ".join(pure_text).split()
+
+    arg_result = dict()
+    for arg_type, _ in arg_template.items():
+        arg_result[arg_type] = list()
+
+    iter_pure_text = previous_and_current_and_next_and_nextnext(pure_text)
+    
+    for previous_arg, arg, next_arg, nextnext_arg in iter_pure_text:
+        print(f"1.current result: {arg_result}")
+        print(f"2.previous_arg: {previous_arg}, arg: {arg}, next_arg: {next_arg}, nextnext_arg: {nextnext_arg}")
+        is_arg = False
+        for k, v in arg_template.items():
+            print(f"arg: {arg}, v: {v}")
+            if arg.startswith(tuple(v)): # 看着像是个参数表达式
+                try:
+                    if "=" not in arg:  # 不构成完整的参数表达式 a=b
+                        print(f"不构成完整的参数表达式 {arg}")
+                        if next_arg and next_arg.startswith("="): # 和下一个参数组合起来可能是完整的参数表达式
+                            if "=" == next_arg: # 淦其实只有一个等于号，但可能和下下个参数组合起来是完整的参数表达式
+                                if nextnext_arg : # 有下下个参数
+                                    arg = arg + next_arg + nextnext_arg # 肯定是完整的参数表达式了
+                                    arg_result[k].append(arg.split("=", 1)[1])
+                                    is_arg = True
+                                    next(iter_pure_text) # 跳到下下下个参数
+                                    next(iter_pure_text)
+                                    break
+                            else: # 肯定是完整的参数表达式了
+                                arg = arg + next_arg 
+                                arg_result[k].append(arg.split("=", 1)[1])
+                                is_arg = True
+                                next(iter_pure_text) # 跳到下下个参数
+                                break
+                        else:
+                            raise IndexError # 没有下一个参数，肯定不是完整的参数表达式
+                    elif arg.endswith("="): # 有等于号，但是等于号在最后，肯定不是完整的参数表达式
+                        print(f"有等于号，但是等于号在最后，肯定不是完整的参数表达式 {arg}")
+                        if next_arg: # 有下一个参数
+                            arg = arg + next_arg
+                            arg_result[k].append(arg.split("=", 1)[1])
+                            is_arg = True
+                            next(iter_pure_text)
+                            break
+                    elif arg.startswith("="):
+                        raise IndexError # 等于号在最前面，肯定不是完整的参数表达式
+                    else: # 构成完整的参数表达式 a=b
+                        print(f"构成完整的参数表达式 {arg}")
+                        argv = arg.split("=", 1)[1]
+                        if not argv: # 但是没有参数值
+                            arg_result["tag"].append(arg)
+                        else:
+                            arg_result[k].append(argv)
+                        is_arg = True
+                    break    
+                except IndexError: # 误会了，不是参数表达式
+                    arg_result["tag"].append(arg)
+                    is_arg = False
+                    break
+            else: # 不是参数表达式
+                print(f"对于{v=} 不是参数表达式 {arg}")
+            
+        if not is_arg:
+            arg_result["tag"].append(arg)
+        is_arg = False
+
+    # deduplicate
+    for k, v in arg_result.items():
+        arg_result[k] = list(set(v))
+
+    cat_id_list = list()
+    no_cat_id_list = list()
+
+    if not arg_result["cat"]:
+        arg_result["cat"] = ["怡宝"]
+
+    for cat in arg_result["cat"]:
+        c_res = await ep_alias_to_id(cat)
+        if c_res:
+            cat_id_list.append(c_res)
+        else:
+            no_cat_id_list.append(cat)
+    
+    arg_result["cat"] = cat_id_list
+    arg_result["no_cat"] = no_cat_id_list
+
+
+    return arg_result
 
 async def upload_image(matcher, image_contents: list[bytes], caption: list[str], uploader_info: dict, under_review: bool, comment: list[str], catalogue: list[str]):
     image_count = 0
@@ -150,12 +220,8 @@ async def upload_image(matcher, image_contents: list[bytes], caption: list[str],
 
 async def extract_upload(args):
     extra_data = dict()
-    extra_data["comment"] = list()
-    extra_data["catalogue"] = list()
     image_url_list = list()
-    no_such_cat_list = list()
-    caption = list()
-    # parsed_args = await ei_argparser(args)
+
     for seg in args:
         if isinstance(seg, MessageSegment):
             seg_type = seg.type
@@ -163,34 +229,16 @@ async def extract_upload(args):
         else:
             seg_type = seg["type"]
             seg_data = seg["data"]
+        
         if seg_type == "image":
             image_url_list.append(seg_data["url"])
-        if seg_type == "text":
-            text_block: str = seg_data["text"]
-            text_block = text_block.strip().split()
-            for text in text_block:
-                if text.startswith("com="):
-                    extra_data["comment"].append(text[4:].strip())
-                    continue
-                if text.startswith("cat="):
-                    cat = text[4:].strip().split(",")
-                    for c in cat:
-                        c_res = await ep_alias_to_id(c)
-                        if c_res is not None:
-                            extra_data["catalogue"].append(c_res)
-                        else:
-                            no_such_cat_list.append(c)
-                    continue
-                text.replace("＃", "#")
-                if tag_pat.match(text):
-                    caption.append(text)
-                else:
-                    text = text.replace("#", "")
-                    if text != "":
-                        caption.append(f"#{text}")
-    extra_data["no_such_cat_list"] = no_such_cat_list
-    if not extra_data["catalogue"]:
-        extra_data["catalogue"].append(await ep_alias_to_id("怡宝"))
+
+    parsed_args = await ei_argparser(args)
+    extra_data["comment"] = parsed_args["com"]
+    extra_data["catalogue"] = parsed_args["cat"]
+    caption = parsed_args["tag"]
+    extra_data["no_such_cat_list"] = parsed_args["no_cat"]
+
     return image_url_list, caption, extra_data
 
 
@@ -255,17 +303,10 @@ def common_member(a, b):
 
 async def get_idiom_result(keyword: str, limit: int):
     keyword_list = keyword.split(" ")
-    cat_id_list = list()
-    com_list = list()
-    for kl in keyword_list:
-        kl.replace("＝", "=")
-        if kl.startswith("cat="):
-            for cat in kl[4:].split(","):
-                cat_id_list.append(await ep_alias_to_id(cat))
-            keyword = keyword.replace(kl, "")
-        elif kl.startswith("com="):
-            com_list.append(kl[4:])
-            keyword = keyword.replace(kl, "")
+    args = await ei_argparser(keyword_list)
+    cat_id_list = args["cat"]
+    com_list = args["com"]
+    
     limit_count = 0
     if keyword.strip() == "":
         # 无关键词，按照分类/备注搜索
@@ -281,16 +322,15 @@ async def get_idiom_result(keyword: str, limit: int):
             idiom_list = await get_idiom_by_catalogue(cat_id_list)
             idiom_list = list(idiom_list)
         elif com_list:
-            res_com_list = await get_idiom_by_comment(com_list)
-            res_com_list = list(res_com_list)
-            idiom_list.extend(res_com_list)
+            idiom_list = await get_idiom_by_comment(com_list)
+            idiom_list = list(idiom_list)
 
         for res in idiom_list:
             filename = f"{res['image_hash']}.{res['image_ext']}"
             image_bytes = await ei_img_storage_download(filename)
-            id = await base16_to_base32(res['image_hash'])
+            img_id = await hash_shortener(res['image_hash'])
             result_text += MessageSegment.image(BytesIO(image_bytes))
-            result_text += f"ID: {id}\n"
+            result_text += f"ID: {img_id}\n"
             if len(res["tags"]) > 0:
                 result_text += f"标签：{' '.join(res['tags'])}\n"
             if len(res["catalogue"]) > 0:
@@ -333,10 +373,10 @@ async def get_idiom_result(keyword: str, limit: int):
                 continue
             filename = f"{mongo_res['image_hash']}.{mongo_res['image_ext']}"
             image_bytes = await ei_img_storage_download(filename)
-            id = await base16_to_base32(mongo_res['image_hash'])
+            img_id = await hash_shortener(mongo_res['image_hash'])
             result_text += MessageSegment.image(BytesIO(image_bytes))
             result_text += f"相关性：{res['_score']}\n"
-            result_text += f"ID: {id}\n"
+            result_text += f"ID: {img_id}\n"
             if len(res["_source"]["tags"]) > 0:
                 result_text += f"标签：{' '.join(mongo_res['tags'])}\n"
             else:
@@ -345,3 +385,40 @@ async def get_idiom_result(keyword: str, limit: int):
                 break
             result_scores.append(res["_score"])
         return result_text, limit_count
+
+async def message_striper(msg: Message):
+    if len(msg) == 0:
+        return ""
+    if msg[-1].type == "text":
+        msg[-1].data["text"] = msg[-1].data["text"].strip()
+    return msg
+
+async def message_filter(msg: Message, retries: int = 0):
+    new_msg = Message()
+    new_msg.append(MessageSegment.text("已过滤部分词汇\n"))
+    count = 0
+    for seg in msg:
+        if seg.type == "image":
+            if count == retries:
+                seg = MessageSegment.text("[可能是被屏蔽的图片]")
+                break
+            count += 1
+        new_msg.append(seg)
+
+    return new_msg
+
+async def get_card_with_cache(id):
+    bot = get_bots().values().__iter__().__next__()
+    id = str(id)
+    card = await get_gm_info(id)
+    if card is None:
+        try:
+            giver_info: dict = await bot.get_group_member_info(group_id=int(ellye_gid[0]), user_id=id)
+            card: str = giver_info["card"] or giver_info["nickname"] or giver_info["user_id"]
+            await set_gm_info(id, card)
+            logger.info(f"{id}'s card is {card}, cached it")
+        except ActionFailed:
+            card = id
+    else:
+        logger.debug(f"read user card from cache succeed: {card}")
+    return card

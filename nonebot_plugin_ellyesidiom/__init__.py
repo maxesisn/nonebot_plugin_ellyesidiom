@@ -1,32 +1,49 @@
 import asyncio
 import os
-from nonebot import on_command
-from nonebot.adapters.onebot.v11 import Bot, Event, Message, MessageSegment
-from nonebot.params import CommandArg
+from nonebot import on_command, on_notice, on_shell_command
+from nonebot.adapters.onebot.v11 import Bot, Event, Message, MessageSegment, PokeNotifyEvent
+from nonebot.params import CommandArg, StateParam
 from nonebot.rule import to_me
+from nonebot.typing import T_State
+from nonebot.adapters.onebot.v11.exception import ActionFailed
 
 
-from .tools import any_to_base16, download_image_from_qq, extract_upload, global_config, upload_image
-from .tools import base16_to_base32
+from .tools import download_image_from_qq, extract_upload, global_config, upload_image
 from .tools import get_idiom_result
+from .tools import message_striper, message_filter
+from .tools import hash_extender, hash_shortener
+from .tools import get_card_with_cache
+from .tools import ei_argparser
 from .data_es import update_ocr_text as es_update_ocr_text, add_tags_by_hash as es_add_tags_by_hash, delete_idiom_by_image_hash as es_delete_idiom_by_image_hash
-from .data_mongo import delete_idiom_by_image_hash, get_ext_by_image_hash, get_review_status_by_image_hash, get_under_review_idioms, update_ocr_text_by_image_hash, update_review_status_by_image_hash
+from .data_mongo import delete_idiom_by_image_hash, edit_catalogue_by_image_hash, edit_comment_by_image_hash, edit_tags_by_hash, get_ext_by_image_hash, get_review_status_by_image_hash, get_under_review_idioms, update_ocr_text_by_image_hash, update_review_status_by_image_hash
 from .data_mongo import count_under_review, count_reviewed
 from .data_mongo import add_tags_by_hash
+from .data_mongo import get_uploader_rank
+from .data_mongo import get_random_idiom
+from .data_redis import get_ratelimited, set_ratelimited
 from .storage import ei_img_storage_delete, ei_img_storage_download
 from .ocr import get_ocr_text_cloud
 from .cat_checker import ep_alias
 from .eh_server import *
+from .consts import tips_no_permission
 
 ei_upload_whitelist: list[str] = global_config.ei_upload_whitelist
+ellye_gid = global_config.ellye_gid
 
+def _poke_checker(event: PokeNotifyEvent) -> bool:
+    print(f"{event.target_id=} {event.self_id=}")
+    return event.target_id == event.self_id
 
 upload = on_command("投稿", rule=to_me())
 bulk_upload = on_command("批量导入", rule=to_me())
 search = on_command("查询", rule=to_me())
 delete = on_command("删除", rule=to_me())
 statistics = on_command("统计", rule=to_me())
+rank = on_command("排行", rule=to_me())
 edit = on_command("编辑", rule=to_me())
+
+random_idiom_poke = on_notice(rule=_poke_checker)
+random_idiom_command = on_command("每日怡言", rule=to_me())
 
 add_tags = on_command("添加tag", rule=to_me())
 
@@ -41,10 +58,11 @@ pull_image = on_command("调取", rule=to_me())
 
 ei_help = on_command("帮助", rule=to_me())
 
+test_ap = on_command("测试ap", rule=to_me())
+
 
 @upload.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
-    caption_text = str()
     image_url_list, caption, extra_data = await extract_upload(args)
     if len(image_url_list) == 0 and event.reply is not None:
         reply_msg = await bot.get_msg(message_id=event.reply.message_id)
@@ -83,7 +101,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     image_hashes = [hash.split(".")[0] for hash in filename_list]
     upload_ok_quote += "\nID: "
     for image_hash in image_hashes:
-        upload_ok_quote += f"{await base16_to_base32(image_hash)} "
+        upload_ok_quote += f"{await hash_shortener(image_hash)} "
     if len(image_hashes) == 0:
         await upload.finish(reply_seg + "上传失败，没有可上传的新怡闻录。")
     # TODO still need to fix parameters
@@ -96,13 +114,32 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if len(args) == 0:
         await search.finish("请输入查询关键词。")
     keyword = str(args)
-    keyword.replace("#", "")
+    keyword = keyword.replace("#", "")
     if keyword == "":
         await search.finish("请输入查询关键词。")
-    result_str, count = await get_idiom_result(keyword, 5)
-    if result_str == "":
+    result_msg, count = await get_idiom_result(keyword, 5)
+    result_msg = await message_striper(result_msg)
+    if not result_msg:
         await search.finish("未找到相关结果。")
-    await search.finish(result_str)
+    try:
+        await search.finish(result_msg)
+    except ActionFailed:
+        retries = 0
+        msg_length = len(result_msg)
+        while True:
+            try:
+                if retries >= msg_length:
+                    try:
+                        await search.finish("结果中的敏感图片过多，发送失败。")
+                    except ActionFailed:
+                        break
+                result_msg = await message_filter(result_msg, retries)
+                await search.finish(result_msg)
+            except ActionFailed:
+                retries += 1
+            else:
+                break
+        
 
 # import files from folder and upload
 
@@ -122,7 +159,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 @update_ocr.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await update_ocr.finish("您没有权限使用此命令。")
+        await update_ocr.finish(tips_no_permission)
     filelist = os.listdir("/home/maxesisn/botData/ei_images")
     for file in filelist:
         filename_without_ext = file.split(".")[0]
@@ -136,20 +173,22 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 @get_ocr_result.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await get_ocr_result.finish("您没有权限使用此命令。")
+        await get_ocr_result.finish(tips_no_permission)
     req_hash = str(args)
     for file in os.listdir("/home/maxesisn/botData/ei_images"):
         if file.startswith(req_hash):
             with open(f"/home/maxesisn/botData/ei_images/{file}", "rb") as f:
                 image_bytes = f.read()
                 ocr_text = await get_ocr_text_cloud(image_bytes)
+                print(ocr_text)
                 await get_ocr_result.finish()
+    
 
 
 @delete.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await delete.finish("您没有权限使用此命令。")
+        await delete.finish(tips_no_permission)
     if len(args) == 0:
         await delete.finish("请输入要删除的ID。")
     image_hashes = str(args)
@@ -158,10 +197,10 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     for image_hash in image_hashes:
         temp_result_text = ""
 
-        image_hash = await any_to_base16(image_hash)
+        image_hash = await hash_extender(image_hash, event.group_id)
         image_ext = await get_ext_by_image_hash(image_hash)
         if not image_ext:
-            temp_result_text += f"未找到ID为{await base16_to_base32(image_hash)}的图片。\n"
+            temp_result_text += f"未找到ID为{await hash_shortener(image_hash)}的图片。\n"
         else:
             await ei_img_storage_delete(f"{image_hash}.{image_ext}")
 
@@ -170,9 +209,9 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
             await es_delete_idiom_by_image_hash(image_hash)
         except IndexError:
             if temp_result_text == "":
-                temp_result_text += f"未找到ID为{await base16_to_base32(image_hash)}的记录。\n"
+                temp_result_text += f"未找到ID为{await hash_shortener(image_hash)}的记录。\n"
             else:
-                temp_result_text = f"未找到ID为{await base16_to_base32(image_hash)}的图片与记录。\n"
+                temp_result_text = f"未找到ID为{await hash_shortener(image_hash)}的图片与记录。\n"
         result_text += temp_result_text
     await delete.send(result_text)
     await delete.finish("已全部删除。")
@@ -184,17 +223,36 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     result_reviewed = await count_reviewed()
     await statistics.finish(f"待审核：{result_under_review}\n已审核：{result_reviewed}")
 
+@rank.handle()
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    rank_result = await get_uploader_rank()
+    msg = []
+    for res in rank_result:
+        msg.append(f"{await get_card_with_cache(res['_id'])}：{res['count']}")
+    await rank.finish("\n".join(msg))
+
+@random_idiom_poke.handle()
+@random_idiom_command.handle()
+async def _(bot: Bot, event: Event):
+    if get_ratelimited("daily_idiom"):
+        return 
+    set_ratelimited("daily_idiom", 2)
+    random_idiom = await get_random_idiom()
+    img_filename = f"{random_idiom['image_hash']}.{random_idiom['image_ext']}"
+    img = await ei_img_storage_download(img_filename)
+    await bot.send(event, MessageSegment.image(img))
+
 
 @add_tags.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await add_tags.finish("您没有权限使用此命令。")
+        await add_tags.finish(tips_no_permission)
     if len(args) == 0:
         await add_tags.finish("请输入要添加标签的ID。")
     args = str(args).split()
     image_hash = args[0]
     tags = args[1:]
-    image_hash = await any_to_base16(image_hash)
+    image_hash = await hash_extender(image_hash, event.group_id)
     print(image_hash, tags)
     await add_tags_by_hash(image_hash, tags)
     await es_add_tags_by_hash(image_hash, tags)
@@ -204,19 +262,19 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 @calculate_hash.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     args = str(args)
-    calculate_hash.finish(await any_to_base16(args))
+    calculate_hash.finish(await hash_extender(args, event.group_id))
 
 
 @approve_idiom.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await approve_idiom.finish("您没有权限使用此命令。")
+        await approve_idiom.finish(tips_no_permission)
     if len(args) == 0:
         await approve_idiom.finish("请输入要审核的ID。")
     image_hashes = str(args).split()
 
     for image_hash in image_hashes:
-        image_hash = await any_to_base16(image_hash)
+        image_hash = await hash_extender(image_hash, event.group_id)
         image_ext = await get_ext_by_image_hash(image_hash)
         image_bytes = await ei_img_storage_download(f"{image_hash}.{image_ext}")
         ocr_text = await get_ocr_text_cloud(image_bytes)
@@ -229,20 +287,22 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 @reject_idiom.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await reject_idiom.finish("您没有权限使用此命令。")
+        await reject_idiom.finish(tips_no_permission)
     if len(args) == 0:
         await reject_idiom.finish("请输入要审核的ID。")
     image_hashes = str(args).split()
     for image_hash in image_hashes:
-        image_hash = await any_to_base16(image_hash)
+        image_hash = await hash_extender(image_hash, event.group_id)
         image_current_reviewing_status = await get_review_status_by_image_hash(image_hash)
         if image_current_reviewing_status == True:
+            logger.info(f"Rejected idiom {image_hash} is already rejected, so delete it instead.")
             image_ext = await get_ext_by_image_hash(image_hash)
             await delete_idiom_by_image_hash(image_hash)
             await es_delete_idiom_by_image_hash(image_hash)
             await ei_img_storage_delete(f"{image_hash}.{image_ext}")
 
         else:
+            logger.info(f"Rejected idiom {image_hash} is not rejected, so reject it.")
             await update_review_status_by_image_hash(image_hash, True)
 
         await reject_idiom.finish("已审核。")
@@ -251,24 +311,30 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 @review_list.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await review_list.finish("您没有权限使用此命令。")
+        await review_list.finish(tips_no_permission)
     idiom_list = await get_under_review_idioms()
     result = ""
     for idiom in idiom_list:
-        result += f"hash: {idiom['image_hash']} tags:{idiom['tags']} ocr:{idiom['ocr_text']} cat:{idiom['catalogue']} com:{idiom['comment']}\n"
+        result += f"hash: {idiom['image_hash']} tags:{idiom['tags']} ocr:{idiom['ocr_text']} cat:{idiom['catalogue']} com:{idiom['comment']}"
+        result += MessageSegment.image(await ei_img_storage_download(f"{idiom['image_hash']}.{idiom['image_ext']}"))
+        result += "\n-----------\n"
     if result == "":
         result = "没有待审核的怡闻录。"
+    else:
+        result[-1] = str(result[-1])[:-len("\n-----------\n")]
+        result[-1] = MessageSegment.text(result[-1])
+        result = await message_striper(result)
     await review_list.finish(result)
 
 
 @pull_image.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await pull_image.finish("您没有权限使用此命令。")
+        await pull_image.finish(tips_no_permission)
     if len(args) == 0:
         await pull_image.finish("请输入要调取的hash。")
     image_hash = str(args)
-    image_hash = await any_to_base16(image_hash)
+    image_hash = await hash_extender(image_hash, event.group_id)
     image_ext = await get_ext_by_image_hash(image_hash)
     image = await ei_img_storage_download(f"{image_hash}.{image_ext}")
     await pull_image.finish(MessageSegment.image(image))
@@ -277,21 +343,55 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 @ei_help.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     ei_help_msg = """0. 首先at怡闻录bot
+
 1. 投稿：投稿 标签1 标签2 cat=分类1,分类2 com=备注1,备注2 [图片1] [图片2]
+
 2. 查询：查询 标签1 标签2 cat=分类1,分类2 com=备注1,备注2 [图片1] [图片2]
-剩下的都是管理员命令，不告诉你
+
 """
+    ei_admin_help_msg = """管理员命令：
+1. 审核通过：通过 ID
+2. 审核不通过：打回 ID
+3. 调取图片：调取 ID
+4. 审核列表：待审核列表(只取10条)
+"""
+    ei_non_admin_help_msg = "剩下的都是管理员命令，不告诉你。"
     ep_alias_text = ""
     for k, v in ep_alias.items():
         ep_alias_text += f"{v[0]}: {','.join(v)}\n"
+    ep_alias_text = ep_alias_text.strip()
+    if event.get_user_id() in ei_upload_whitelist:
+        ei_help_msg += ei_admin_help_msg
+    else:
+        ei_help_msg += ei_non_admin_help_msg
+    ei_help_msg += "\n----------------\n"
     ei_help_msg += f"[注1]可用分类：\n{ep_alias_text}"
     await ei_help.finish(ei_help_msg)
 
 
+@test_ap.handle()
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    parsed_args = await ei_argparser(args)
+    result = list()
+    for k, v in parsed_args.items():
+        result.append(f"{k}: {v}")
+    await test_ap.finish("\n".join(result))
+
 @edit.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
-        await edit.finish("您没有权限使用此命令。")
+        await edit.finish(tips_no_permission)
     if len(args) == 0:
-        await edit.finish("请输入要编辑的hash。")
-    image_hash = str(args)
+        await edit.finish("请输入要编辑的ID。")
+    args = str(args).split()
+    image_hash = str(args[0])
+    image_hash = await hash_extender(image_hash, event.group_id)
+    rest_args = args[1:]
+    parsed_args = await ei_argparser(rest_args)
+    if parsed_args["tag"] is not None:
+        await edit_tags_by_hash(image_hash, parsed_args["tag"])
+    if parsed_args["cat"] is not None:
+        await edit_catalogue_by_image_hash(image_hash, parsed_args["cat"])
+    if parsed_args["com"] is not None:
+        await edit_comment_by_image_hash(image_hash, parsed_args["com"])
+    await edit.finish("编辑完成。")
