@@ -84,3 +84,19 @@ async def add_tags_by_hash(id: str, tags: list[str]) -> dict:
             }
         }
     })
+
+async def find_similar_idioms_by_ocr_text(ocr_text: list[str]) -> dict:
+    ocr_text = " ".join(ocr_text)
+    return es.search(index=es_index, body={
+        "query": {
+            "bool": {
+                "must": {
+                    "multi_match": {
+                        "query": ocr_text,
+                        "fields": ["ocr_text"]
+                    }
+                }
+            }
+        }
+    }
+    )

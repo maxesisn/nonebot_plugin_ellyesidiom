@@ -1,10 +1,9 @@
 import asyncio
 import os
-from nonebot import on_command, on_notice, on_shell_command
+from nonebot import on_command, on_notice
 from nonebot.adapters.onebot.v11 import Bot, Event, Message, MessageSegment, PokeNotifyEvent
-from nonebot.params import CommandArg, StateParam
+from nonebot.params import CommandArg
 from nonebot.rule import to_me
-from nonebot.typing import T_State
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 
 
@@ -14,6 +13,7 @@ from .tools import message_striper, message_filter
 from .tools import hash_extender, hash_shortener
 from .tools import get_card_with_cache
 from .tools import ei_argparser
+from .tools import check_dedup
 from .data_es import update_ocr_text as es_update_ocr_text, add_tags_by_hash as es_add_tags_by_hash, delete_idiom_by_image_hash as es_delete_idiom_by_image_hash
 from .data_mongo import delete_idiom_by_image_hash, edit_catalogue_by_image_hash, edit_comment_by_image_hash, edit_tags_by_hash, get_ext_by_image_hash, get_review_status_by_image_hash, get_under_review_idioms, update_ocr_text_by_image_hash, update_review_status_by_image_hash
 from .data_mongo import count_under_review, count_reviewed
@@ -30,9 +30,11 @@ from .consts import tips_no_permission
 ei_upload_whitelist: list[str] = global_config.ei_upload_whitelist
 ellye_gid = global_config.ellye_gid
 
+
 def _poke_checker(event: PokeNotifyEvent) -> bool:
     print(f"{event.target_id=} {event.self_id=}")
     return event.target_id == event.self_id
+
 
 upload = on_command("投稿", rule=to_me())
 bulk_upload = on_command("批量导入", rule=to_me())
@@ -106,6 +108,9 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         await upload.finish(reply_seg + "上传失败，没有可上传的新怡闻录。")
     # TODO still need to fix parameters
     # await upload_to_telegram(upload, reply_seg, image_url_list, caption, sender_info, ei_under_review, upload_ok_quote)
+
+    upload_ok_quote = await check_dedup(image_hashes, upload_ok_quote)
+
     await upload.finish(reply_seg + upload_ok_quote)
 
 
@@ -124,22 +129,15 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     try:
         await search.finish(result_msg)
     except ActionFailed:
-        retries = 0
-        msg_length = len(result_msg)
-        while True:
+        try:
+            result_msg = await message_filter(result_msg)
+            await search.finish(result_msg)
+        except ActionFailed:
             try:
-                if retries >= msg_length:
-                    try:
-                        await search.finish("结果中的敏感图片过多，发送失败。")
-                    except ActionFailed:
-                        break
-                result_msg = await message_filter(result_msg, retries)
-                await search.finish(result_msg)
+                await search.finish("结果中有过多敏感词，不予发送。")
             except ActionFailed:
-                retries += 1
-            else:
-                break
-        
+                await search.finish()
+
 
 # import files from folder and upload
 
@@ -182,7 +180,6 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
                 ocr_text = await get_ocr_text_cloud(image_bytes)
                 print(ocr_text)
                 await get_ocr_result.finish()
-    
 
 
 @delete.handle()
@@ -223,6 +220,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     result_reviewed = await count_reviewed()
     await statistics.finish(f"待审核：{result_under_review}\n已审核：{result_reviewed}")
 
+
 @rank.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     rank_result = await get_uploader_rank()
@@ -231,11 +229,12 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         msg.append(f"{await get_card_with_cache(res['_id'])}：{res['count']}")
     await rank.finish("\n".join(msg))
 
+
 @random_idiom_poke.handle()
 @random_idiom_command.handle()
 async def _(bot: Bot, event: Event):
     if get_ratelimited("daily_idiom"):
-        return 
+        return
     set_ratelimited("daily_idiom", 2)
     random_idiom = await get_random_idiom()
     img_filename = f"{random_idiom['image_hash']}.{random_idiom['image_ext']}"
@@ -281,7 +280,10 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         await update_ocr_text_by_image_hash(image_hash, ocr_text)
         await es_update_ocr_text(image_hash, ocr_text)
         await update_review_status_by_image_hash(image_hash, False)
-    await approve_idiom.finish("已审核。")
+
+    upload_ok_quote = await check_dedup(image_hashes, "")
+
+    await approve_idiom.finish("已审核。"+upload_ok_quote)
 
 
 @reject_idiom.handle()
@@ -295,14 +297,16 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         image_hash = await hash_extender(image_hash, event.group_id)
         image_current_reviewing_status = await get_review_status_by_image_hash(image_hash)
         if image_current_reviewing_status == True:
-            logger.info(f"Rejected idiom {image_hash} is already rejected, so delete it instead.")
+            logger.info(
+                f"Rejected idiom {image_hash} is already rejected, so delete it instead.")
             image_ext = await get_ext_by_image_hash(image_hash)
             await delete_idiom_by_image_hash(image_hash)
             await es_delete_idiom_by_image_hash(image_hash)
             await ei_img_storage_delete(f"{image_hash}.{image_ext}")
 
         else:
-            logger.info(f"Rejected idiom {image_hash} is not rejected, so reject it.")
+            logger.info(
+                f"Rejected idiom {image_hash} is not rejected, so reject it.")
             await update_review_status_by_image_hash(image_hash, True)
 
         await reject_idiom.finish("已审核。")
@@ -376,6 +380,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     for k, v in parsed_args.items():
         result.append(f"{k}: {v}")
     await test_ap.finish("\n".join(result))
+
 
 @edit.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):

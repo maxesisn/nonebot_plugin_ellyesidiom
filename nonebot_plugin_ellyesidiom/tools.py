@@ -1,4 +1,5 @@
 import os
+import random
 import re
 from io import BytesIO
 
@@ -10,9 +11,11 @@ from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 from itertools import tee, islice, chain
 from nonebot.log import logger
+from PIL import Image, ImageDraw
+import base64
 
-from .data_es import search_idiom as es_search_idiom, add_idiom as es_add_idiom
-from .data_mongo import get_catalogue_by_image_hash, get_comment_by_image_hash, get_idiom_by_catalogue, get_idiom_by_comment, add_idiom
+from .data_es import find_similar_idioms_by_ocr_text, search_idiom as es_search_idiom, add_idiom as es_add_idiom
+from .data_mongo import get_catalogue_by_image_hash, get_comment_by_image_hash, get_idiom_by_catalogue, get_idiom_by_comment, add_idiom, get_ocr_text_by_image_hash
 from .data_mongo import check_image_hash_exists, check_ocr_text_exists
 from .data_mongo import get_idiom_by_image_hash
 from .data_mongo import get_full_hash_by_prefix
@@ -49,7 +52,22 @@ async def hash_extender(base16_str: str, gid: str) -> str:
     else:
         raise HashPrefixConflictError(base16_str, hash_list, gid)
 
-
+async def check_dedup(image_hashes: list[str], upload_ok_quote: str) -> str:
+    for image_hash in image_hashes:
+        final_ocr_text = await get_ocr_text_by_image_hash(image_hash)
+        dedup_result = await find_similar_idioms_by_ocr_text(final_ocr_text)
+        try:
+            duplicate_idiom_hash = dedup_result["hits"]["hits"][0]["_source"]["image_hash"]
+            score = dedup_result["hits"]["hits"][0]["_score"]
+            if image_hash == duplicate_idiom_hash:
+                duplicate_idiom_hash = dedup_result["hits"]["hits"][1]["_source"]["image_hash"]
+                score = dedup_result["hits"]["hits"][1]["_score"]
+        except IndexError:
+            return upload_ok_quote
+        if score > 8:
+            duplicate_idiom_id = await hash_shortener(duplicate_idiom_hash)
+            upload_ok_quote += f"\n警告：{await hash_shortener(image_hash)} 似乎与已有怡言 {duplicate_idiom_id} 重复，分数：{score}。"
+    return upload_ok_quote
 
 async def download_image_from_qq(url):
     r = await client.get(url, timeout=10)
@@ -89,7 +107,12 @@ async def ei_argparser(message: Message | list) -> dict:
         else:
             for seg in message:
                 if seg["type"] == "text":
-                    pure_text.append(seg["data"]["text"].replace("＃", "#").replace("＝", "="))
+                    pure_text.append(seg["data"]["text"]
+                    .replace("＃", "#")
+                    .replace("＝", "=")
+                    .replace("，", ",")
+                    .replace(", ", ",")
+                )
         
     
     pure_text = " ".join(pure_text).split()
@@ -412,16 +435,34 @@ async def message_striper(msg: Message):
         msg[-1].data["text"] = msg[-1].data["text"].strip()
     return msg
 
-async def message_filter(msg: Message, retries: int = 0):
+async def message_filter(msg: Message):
+
+    def ri() -> int:
+        return random.randint(0, 8)
+
+    def rc() -> int:
+        return random.randint(0, 255)
+    
+    
+    async def draw_point(img: str) -> str:
+        img = base64.b64decode(img.replace("base64://", ""))
+        img = Image.open(BytesIO(img))
+        draw = ImageDraw.Draw(img)
+        draw.point([(ri(), ri()), (ri(), ri()), (ri(), ri()), (ri(), ri())], fill=(rc(), rc(), rc()))
+        draw.point([(img.width - ri(), img.height - ri()), (img.width - ri(), img.height - ri()),
+                    (img.width - ri(), img.height - ri()), (img.width - ri(), img.height - ri())], fill=(rc(), rc(), rc()))
+        img_bytes = BytesIO()
+        img.save(img_bytes, format="PNG")
+        img_bytes = img_bytes.getvalue()
+        img_bytes = base64.b64encode(img_bytes)
+        return f"base64://{img_bytes.decode()}"
+    
+
     new_msg = Message()
-    new_msg.append(MessageSegment.text("已过滤部分词汇\n"))
-    count = 0
+    new_msg.append(MessageSegment.text("结果中有敏感图片，已进行处理\n\n"))
     for seg in msg:
         if seg.type == "image":
-            if count == retries:
-                seg = MessageSegment.text("[可能是被屏蔽的图片]")
-                break
-            count += 1
+            seg.data["file"] = await draw_point(seg.data["file"])
         new_msg.append(seg)
 
     return new_msg

@@ -139,3 +139,6 @@ async def set_gm_info(user_id, gm_info):
 
 async def get_random_idiom() -> dict:
     return idioms_data.aggregate([{"$sample": {"size": 1}}]).next()
+
+async def get_ocr_text_by_image_hash(image_hash: str) -> list[str]:
+    return idioms_data.find_one({"image_hash": image_hash})["ocr_text"]
