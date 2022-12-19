@@ -18,6 +18,7 @@ ei_data = client.ei_data
 me_data = client.me_data
 
 idioms_data = ei_data.idioms.with_options(codec_options=codec_opt)
+greylist_data = ei_data.greylist.with_options(codec_options=codec_opt)
 cards_data = me_data.cards.with_options(codec_options=codec_opt)
 
 async def get_idiom_by_image_hash(image_hash: str) -> dict:
@@ -35,7 +36,6 @@ async def add_idiom(tags: list[str], image_hash: str, image_ext:str, ocr_text: l
         "catalogue": catalogue,
         "timestamp": datetime.datetime.now(shanghai_tz)
     }
-    print(comment, "comment")
     return idioms_data.insert_one(body)
 
 async def delete_idiom_by_image_hash(image_hash: str) -> None:
@@ -112,6 +112,9 @@ async def get_full_hash_by_prefix(prefix: str) -> list[str] | None:
             result.append(hash["image_hash"])
         return result
 
+async def get_uploader_by_hash(image_hash: str) -> dict:
+    return idioms_data.find_one({"image_hash": image_hash})["uploader"]
+
 # get uploader nickname rank and exclude under_review idioms and platform is not qq
 async def get_uploader_rank() -> list[dict]:
     return idioms_data.aggregate([
@@ -125,7 +128,6 @@ async def get_gm_info(user_id):
     user_id = str(user_id)
     result: dict = cards_data.find_one({'id': user_id})
     card: str = result['card'] if result else None
-    print(f"{user_id=} {card=}")
     return card
 
 async def set_gm_info(user_id, gm_info):
@@ -142,3 +144,10 @@ async def get_random_idiom() -> dict:
 
 async def get_ocr_text_by_image_hash(image_hash: str) -> list[str]:
     return idioms_data.find_one({"image_hash": image_hash})["ocr_text"]
+
+async def greylist_incr(user_id:str, platform:str) -> int:
+    return greylist_data.update_one(
+        {"user_id": user_id, "platform": platform},
+        {"$inc": {"count": 1}},
+        upsert=True
+    ).modified_count

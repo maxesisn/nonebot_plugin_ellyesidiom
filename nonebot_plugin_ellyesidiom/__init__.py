@@ -6,7 +6,6 @@ from nonebot.params import CommandArg
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11.exception import ActionFailed
 
-
 from .tools import download_image_from_qq, extract_upload, global_config, upload_image
 from .tools import get_idiom_result
 from .tools import message_striper, message_filter
@@ -14,8 +13,10 @@ from .tools import hash_extender, hash_shortener
 from .tools import get_card_with_cache
 from .tools import ei_argparser
 from .tools import check_dedup
-from .data_es import update_ocr_text as es_update_ocr_text, add_tags_by_hash as es_add_tags_by_hash, delete_idiom_by_image_hash as es_delete_idiom_by_image_hash
-from .data_mongo import delete_idiom_by_image_hash, edit_catalogue_by_image_hash, edit_comment_by_image_hash, edit_tags_by_hash, get_ext_by_image_hash, get_review_status_by_image_hash, get_under_review_idioms, update_ocr_text_by_image_hash, update_review_status_by_image_hash
+from .tools import xxh3_64_hexdigest
+from .tools import client
+from .data_es import update_ocr_text as es_update_ocr_text, add_tags_by_hash as es_add_tags_by_hash, delete_idiom_by_image_hash as es_delete_idiom_by_image_hash, update_under_review_by_hash as es_update_review_status
+from .data_mongo import delete_idiom_by_image_hash, edit_catalogue_by_image_hash, edit_comment_by_image_hash, edit_tags_by_hash, get_ext_by_image_hash, get_review_status_by_image_hash, get_under_review_idioms, get_uploader_by_hash, greylist_incr, update_ocr_text_by_image_hash, update_review_status_by_image_hash
 from .data_mongo import count_under_review, count_reviewed
 from .data_mongo import add_tags_by_hash
 from .data_mongo import get_uploader_rank
@@ -32,7 +33,6 @@ ellye_gid = global_config.ellye_gid
 
 
 def _poke_checker(event: PokeNotifyEvent) -> bool:
-    print(f"{event.target_id=} {event.self_id=}")
     return event.target_id == event.self_id
 
 
@@ -49,8 +49,8 @@ random_idiom_command = on_command("每日怡言", rule=to_me())
 
 add_tags = on_command("添加tag", rule=to_me())
 
-update_ocr = on_command("更新OCR", rule=to_me())
-get_ocr_result = on_command("OCR", rule=to_me())
+update_ocr = on_command("更新ocr", rule=to_me())
+get_ocr_result = on_command("ocr", rule=to_me())
 calculate_hash = on_command("计算", rule=to_me())
 
 approve_idiom = on_command("通过", rule=to_me())
@@ -80,7 +80,6 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if len(image_url_list) == 0:
         await upload.finish(reply_seg + "仅接受图片投稿。")
     if extra_data["no_such_cat_list"]:
-        print(extra_data["no_such_cat_list"])
         await upload.finish(reply_seg + f"没有找到分类：{', '.join(extra_data['no_such_cat_list'])}，取消上传。")
     caption = list(set(caption))
     caption_without_hash = list()
@@ -109,7 +108,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     # TODO still need to fix parameters
     # await upload_to_telegram(upload, reply_seg, image_url_list, caption, sender_info, ei_under_review, upload_ok_quote)
 
-    upload_ok_quote = await check_dedup(image_hashes, upload_ok_quote)
+    if not ei_under_review:
+        upload_ok_quote = await check_dedup(image_hashes, upload_ok_quote, event.group_id)
 
     await upload.finish(reply_seg + upload_ok_quote)
 
@@ -158,14 +158,15 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if event.get_user_id() not in ei_upload_whitelist:
         await update_ocr.finish(tips_no_permission)
-    filelist = os.listdir("/home/maxesisn/botData/ei_images")
-    for file in filelist:
-        filename_without_ext = file.split(".")[0]
-        with open(f"/home/maxesisn/botData/ei_images/{file}", "rb") as f:
-            print(f"Updating {file}")
-            ocr_text = await get_ocr_text_cloud(f.read())
-            await update_ocr_text_by_image_hash(filename_without_ext, ocr_text)
-            await es_update_ocr_text(filename_without_ext, ocr_text)
+    image_hash = str(args)
+    image_hash = await hash_extender(image_hash, event.group_id)
+    image_ext = await get_ext_by_image_hash(image_hash)
+    image_bytes = await ei_img_storage_download(image_hash+"."+image_ext)
+    ocr_text = await get_ocr_text_cloud(image_bytes)
+
+    await update_ocr_text_by_image_hash(image_hash, ocr_text)
+    await es_update_ocr_text(image_hash, ocr_text)
+
 
 
 @get_ocr_result.handle()
@@ -178,8 +179,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
             with open(f"/home/maxesisn/botData/ei_images/{file}", "rb") as f:
                 image_bytes = f.read()
                 ocr_text = await get_ocr_text_cloud(image_bytes)
-                print(ocr_text)
-                await get_ocr_result.finish()
+                await get_ocr_result.finish(ocr_text)
 
 
 @delete.handle()
@@ -252,7 +252,6 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     image_hash = args[0]
     tags = args[1:]
     image_hash = await hash_extender(image_hash, event.group_id)
-    print(image_hash, tags)
     await add_tags_by_hash(image_hash, tags)
     await es_add_tags_by_hash(image_hash, tags)
     await add_tags.finish("已添加标签。")
@@ -260,8 +259,18 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 
 @calculate_hash.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
-    args = str(args)
-    calculate_hash.finish(await hash_extender(args, event.group_id))
+    results = list()
+    for seg in args:
+        if seg.type == "image":
+            image_url = seg.data["url"]
+            image_bytes = await client.get(image_url)
+            image_bytes = image_bytes.content
+            image_hash = xxh3_64_hexdigest(image_bytes)
+            results.append(image_hash)
+    if len(results) == 0:
+        results.append(await hash_extender(str(args), event.group_id))
+    results = "\n".join(results)
+    await calculate_hash.finish(results)
 
 
 @approve_idiom.handle()
@@ -277,11 +286,12 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         image_ext = await get_ext_by_image_hash(image_hash)
         image_bytes = await ei_img_storage_download(f"{image_hash}.{image_ext}")
         ocr_text = await get_ocr_text_cloud(image_bytes)
+        await update_review_status_by_image_hash(image_hash, False)
+        await es_update_review_status(image_hash, False)
         await update_ocr_text_by_image_hash(image_hash, ocr_text)
         await es_update_ocr_text(image_hash, ocr_text)
-        await update_review_status_by_image_hash(image_hash, False)
 
-    upload_ok_quote = await check_dedup(image_hashes, "")
+    upload_ok_quote = await check_dedup(image_hashes, "", event.group_id)
 
     await approve_idiom.finish("已审核。"+upload_ok_quote)
 
@@ -295,6 +305,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     image_hashes = str(args).split()
     for image_hash in image_hashes:
         image_hash = await hash_extender(image_hash, event.group_id)
+        uploader = await get_uploader_by_hash(image_hash)
         image_current_reviewing_status = await get_review_status_by_image_hash(image_hash)
         if image_current_reviewing_status == True:
             logger.info(
@@ -303,13 +314,14 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
             await delete_idiom_by_image_hash(image_hash)
             await es_delete_idiom_by_image_hash(image_hash)
             await ei_img_storage_delete(f"{image_hash}.{image_ext}")
+            await greylist_incr(uploader["id"], uploader["platform"])
 
         else:
             logger.info(
                 f"Rejected idiom {image_hash} is not rejected, so reject it.")
             await update_review_status_by_image_hash(image_hash, True)
 
-        await reject_idiom.finish("已审核。")
+    await reject_idiom.finish("已审核。")
 
 
 @review_list.handle()

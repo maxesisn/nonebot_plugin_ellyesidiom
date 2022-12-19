@@ -58,11 +58,11 @@ async def ei_img_storage_download_fallback(filename:str):
         print(e.get_error_code())
         print(e.get_error_msg())
         print(e.get_resource_location())
-        return False
+        return None
     except CosClientError as e:
         print(e.get_error_code())
         print(e.get_error_msg())
-        return False
+        return None
     image_bytes = response["Body"]
     image_bytes = image_bytes.get_raw_stream().read()
     return image_bytes
@@ -77,11 +77,11 @@ async def ei_img_storage_delete(filename:str):
         print(e.get_error_code())
         print(e.get_error_msg())
         print(e.get_resource_location())
-        return False
+        return None
     except CosClientError as e:
         print(e.get_error_code())
         print(e.get_error_msg())
-        return False
+        return None
     filelist = os.listdir(cache_dir)
     if filename in filelist:
         os.remove(os.path.join(cache_dir, filename))

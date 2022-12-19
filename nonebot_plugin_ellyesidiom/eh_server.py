@@ -52,7 +52,6 @@ async def search(keyword: str):
     for data in search_res:
         data_hash = data["_source"]["image_hash"]
         data = await get_idiom_by_image_hash(data_hash)
-        print(data)
         temp_dict = {}
         if "tags" in data and data["tags"]:
             temp_dict["title"] = " ".join(data["tags"])
@@ -60,7 +59,6 @@ async def search(keyword: str):
             temp_dict["title"] = ""
         subtitle_str = ""
         cat_name = list()
-        print(data, type(data))
         if "catalogue" in data and data["catalogue"]:
             for cat in data["catalogue"]:
                 cat_name.append(await id_to_ep_alias(cat))
@@ -77,7 +75,6 @@ async def search(keyword: str):
         image_url = f"https://{ei_img_storage_bucket}.cos.{ei_img_storage_region}.myqcloud.com/" + image_url
         temp_dict["img"] = image_url
         payload.append(temp_dict)
-    print(payload)
     return JSONResponse(payload)
 
 @router.post("/api/admin_auth")

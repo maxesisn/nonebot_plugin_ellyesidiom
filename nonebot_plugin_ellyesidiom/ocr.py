@@ -23,7 +23,7 @@ ocr = CnOcr(det_model_name="db_resnet34", rec_model_name="densenet_lite_136-gru"
 async def clean_ocr_text(ocr_text: list[dict]) -> list[dict]:
     text_blacklist_partial = ["问怡宝一律", "问怡宝回答是", "问怡宝绿帽", "Hoshino", "星乃花园#", "人在线", "相亲相爱", "怡讯大厦", "番灵装", "星乃4.5群之", "怡甸园"]
     text_blacklist_fullmatch = ["发送", "取消", "<返回"]
-    text_blacklist_regex = [r"^(上午|下午)?([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", "Hoshino(.*)花园", "^LV(.*)?(群主|管理员)$"]
+    text_blacklist_regex = [r"^(上午|下午)?([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", r"Hoshino(.*)花园", r"^LV(.*)?(群主|管理员)$", r"^\[.*]"]
     cleaned_ocr_text = list()
     for i in ocr_text:
         if any(blacklisted_text in i["text"] for blacklisted_text in text_blacklist_partial):
@@ -65,7 +65,6 @@ async def ocr_text_analyze(ocr_result: list[dict]) -> list[dict]:
     if len(text_height_list) == 0:
         return None
     text_height_average = sum(text_height_list) / len(text_height_list)
-    text_height_average = text_height_average
     print("Average height:", text_height_average)
     text_list = list()
     # if all values in text_height_gap_list are the lower than 3
@@ -89,10 +88,8 @@ async def get_ocr_text_local(image) -> list[str]:
         temp_dict["height"] = await calculate_height_from_ndarray(ocr_temp_result_element["position"])
         ocr_result.append(temp_dict)
     ocr_result = await clean_ocr_text(ocr_result)
-    print(ocr_result)
     filtered_ocr_text = await ocr_text_analyze(ocr_result)
     if filtered_ocr_text:
-        print(filtered_ocr_text)
         filtered_ocr_text = [i["text"] for i in filtered_ocr_text]
         return filtered_ocr_text
     else:
@@ -104,7 +101,7 @@ async def get_ocr_text_qcloud_basic(image) -> list[str]:
     req.ImageBase64 = image
     try:
         res = qcloud_ocr_client.GeneralBasicOCR(request=req)
-    except Exception as e:
+    except TencentCloudSDKException as e:
         print(e)
         return []
     res_json = res.to_json_string()
@@ -134,7 +131,7 @@ async def get_ocr_text_qcloud_accurate(image) -> list[str]:
     req.ImageBase64 = image
     try:
         res = qcloud_ocr_client.GeneralAccurateOCR(request=req)
-    except Exception as e:
+    except TencentCloudSDKException as e:
         print(e)
         return []
     res_json = res.to_json_string()
