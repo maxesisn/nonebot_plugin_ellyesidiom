@@ -17,6 +17,10 @@ cos_config = CosConfig(Region=ei_img_storage_region, SecretId=ei_img_storage_id,
 cos_client = CosS3Client(cos_config)
 
 async def ei_img_storage_upload(filename:str, filebytes:bytes):
+    # store to local first
+    with open(os.path.join(cache_dir, filename), "wb") as f:
+        f.write(filebytes)
+    # upload to cos
     try:
         response = cos_client.put_object(
             Bucket=ei_img_storage_bucket,

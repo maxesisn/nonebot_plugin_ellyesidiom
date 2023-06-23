@@ -5,6 +5,7 @@ from cnocr import CnOcr
 from tencentcloud.common import credential
 from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 from tencentcloud.ocr.v20181119 import ocr_client, models
+from .data_redis import get_group_name
 from io import BytesIO
 from PIL import Image
 from nonebot.log import logger
@@ -21,9 +22,13 @@ qcloud_ocr_client = ocr_client.OcrClient(qcloud_cred, "ap-beijing")
 ocr = CnOcr(det_model_name="db_resnet34", rec_model_name="densenet_lite_136-gru", det_model_backend="pytorch", rec_model_backend="pytorch")
 
 async def clean_ocr_text(ocr_text: list[dict]) -> list[dict]:
-    text_blacklist_partial = ["问怡宝一律", "问怡宝回答是", "问怡宝绿帽", "Hoshino", "星乃花园#", "人在线", "相亲相爱", "怡讯大厦", "番灵装", "星乃4.5群之", "怡甸园"]
+    text_blacklist_partial = ["问怡宝一律", "问怡宝回答是", "问怡宝绿帽", "Hoshino", "星乃花园#", "人在线", "相亲相爱", "番灵装", "怡甸园", "tthamy", "清华大学怡国校区", "怡群清华分部", "paradise"]
     text_blacklist_fullmatch = ["发送", "取消", "<返回"]
-    text_blacklist_regex = [r"^(上午|下午)?([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", r"Hoshino(.*)花园", r"^LV(.*)?(群主|管理员)$", r"^\[.*]"]
+    text_blacklist_regex = [r"^(上午|下午)?([0-1]?[0-9]|2[0-3]):[0-5][0-9]$", r"Hoshino(.*)花园", r"^LV(.*)?(群主|管理员)$", r"^\[.*]", r"^【.*】"]
+    group_name = get_group_name().decode("utf-8")
+    group_name = group_name[:5]
+    text_blacklist_partial.extend([group_name])
+
     cleaned_ocr_text = list()
     for i in ocr_text:
         if any(blacklisted_text in i["text"] for blacklisted_text in text_blacklist_partial):
@@ -40,6 +45,18 @@ async def clean_ocr_text(ocr_text: list[dict]) -> list[dict]:
             continue
         cleaned_ocr_text.append(i)
     return cleaned_ocr_text
+
+async def clean_ocr_text_pure_str(ocr_text) -> list:
+    ocr_text_wrapped = list()
+    for ot in ocr_text:
+        ocr_text_wrapped.append({"text": ot})
+    ocr_text_wrapped = await clean_ocr_text(ocr_text_wrapped)
+
+    ocr_text_unwrapped = list()
+    for ot in ocr_text_wrapped:
+        ocr_text_unwrapped.append(ot["text"])
+    
+    return ocr_text_unwrapped
 
 async def calculate_height_from_ndarray(array):
     top_left = array[0]

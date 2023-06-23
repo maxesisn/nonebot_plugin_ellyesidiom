@@ -99,13 +99,6 @@ async def download_image_from_qq(url):
 # solution from https://stackoverflow.com/questions/1011938/loop-that-also-accesses-previous-and-next-values
 
 
-def previous_and_current_and_next_and_nextnext(some_iterable):
-    prevs, items, nexts, nextnexts = tee(some_iterable, 4)
-    prevs = chain([None], prevs)
-    nexts = chain(islice(nexts, 1, None), [None])
-    nextnexts = chain(islice(nextnexts, 2, None), [None, None])
-    return zip(prevs, items, nexts, nextnexts)
-
 
 async def ei_argparser(message: Message | list, write_default_cat = True) -> dict:
     arg_template = {
@@ -116,6 +109,13 @@ async def ei_argparser(message: Message | list, write_default_cat = True) -> dic
 
     pure_text = list()
 
+    def previous_and_current_and_next_and_nextnext(some_iterable):
+        prevs, items, nexts, nextnexts = tee(some_iterable, 4)
+        prevs = chain([None], prevs)
+        nexts = chain(islice(nexts, 1, None), [None])
+        nextnexts = chain(islice(nextnexts, 2, None), [None, None])
+        return zip(prevs, items, nexts, nextnexts)
+        
     if isinstance(message, Message):
         for seg in message:
             if seg.type == "text":
@@ -126,7 +126,7 @@ async def ei_argparser(message: Message | list, write_default_cat = True) -> dic
                                  .replace(", ", ",")
                                  )
     else:
-        if isinstance(message[0], str):
+        if len(message)>0 and isinstance(message[0], str):
             pure_text = message
         else:
             for seg in message:
@@ -214,6 +214,7 @@ async def ei_argparser(message: Message | list, write_default_cat = True) -> dic
 
     for cat in arg_result["cat"]:
         c_res = await ep_alias_to_id(cat)
+        print("c_res: ", c_res)
         if c_res:
             cat_id_list.append(c_res)
         else:
@@ -245,10 +246,11 @@ async def upload_image(matcher, image_contents: list[bytes], caption: list[str],
             exist_image_list.append(image_count)
             continue
 
-        if not under_review:
-            ocr_result = await get_ocr_text_cloud(image_content)
-        else:
-            ocr_result = await get_ocr_text_local(image_content)
+        # if not under_review:
+        #     ocr_result = await get_ocr_text_cloud(image_content)
+        # else:
+        #     ocr_result = await get_ocr_text_local(image_content)
+        ocr_result = await get_ocr_text_cloud(image_content)
         if ocr_result is None:
             no_ocr_content_list.append(image_count)
             continue

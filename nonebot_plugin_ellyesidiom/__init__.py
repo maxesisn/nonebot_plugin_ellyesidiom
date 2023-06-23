@@ -21,10 +21,11 @@ from .data_mongo import count_under_review, count_reviewed
 from .data_mongo import add_tags_by_hash
 from .data_mongo import get_uploader_rank
 from .data_mongo import get_random_idiom
-from .data_redis import get_ratelimited, set_ratelimited
+from .data_mongo import add_cate as mg_add_cate, append_cate as mg_append_cate, get_all_alias
+from .data_mongo import idioms_data
+from .data_redis import get_ratelimited, set_ratelimited, set_group_name
 from .storage import ei_img_storage_delete, ei_img_storage_download
-from .ocr import get_ocr_text_cloud
-from .cat_checker import ep_alias
+from .ocr import get_ocr_text_cloud, clean_ocr_text_pure_str
 from .eh_server import *
 from .consts import tips_no_permission
 
@@ -45,26 +46,35 @@ rank = on_command("排行", rule=to_me())
 edit = on_command("编辑", rule=to_me())
 
 random_idiom_poke = on_notice(rule=_poke_checker)
-random_idiom_command = on_command("每日怡言", rule=to_me())
+random_idiom_command = on_command("每日怡言")
 
 add_tags = on_command("添加tag", rule=to_me())
 
 update_ocr = on_command("更新ocr", rule=to_me())
+refilting_ocr = on_command("重过滤ocr", rule=to_me())
 get_ocr_result = on_command("ocr", rule=to_me())
 calculate_hash = on_command("计算", rule=to_me())
 
 approve_idiom = on_command("通过", rule=to_me())
+approve_batch_idioms = on_command("一键通过", rule=to_me())
 reject_idiom = on_command("打回", rule=to_me())
 review_list = on_command("待审核列表", rule=to_me())
 pull_image = on_command("调取", rule=to_me())
 
-ei_help = on_command("帮助", rule=to_me())
+add_cate = on_command("添加分类")
+append_cate = on_command("追加分类")
+
+ei_help = on_command("怡闻录帮助", rule=to_me())
 
 test_ap = on_command("测试ap", rule=to_me())
 
 
 @upload.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    group_id = event.group_id
+    group_info = await bot.get_group_info(group_id=group_id)
+    group_name = group_info["group_name"]
+    set_group_name(group_name)
     image_url_list, caption, extra_data = await extract_upload(args)
     if len(image_url_list) == 0 and event.reply is not None:
         reply_msg = await bot.get_msg(message_id=event.reply.message_id)
@@ -167,6 +177,19 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     await update_ocr_text_by_image_hash(image_hash, ocr_text)
     await es_update_ocr_text(image_hash, ocr_text)
 
+@refilting_ocr.handle()
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    all_idioms = idioms_data.find()
+    count = 0
+    for idiom in all_idioms:
+        ocr_text = idiom["ocr_text"]
+        if "怡春院" not in str(ocr_text):
+            continue
+        new_ocr_text = await clean_ocr_text_pure_str(ocr_text)
+        await update_ocr_text_by_image_hash(idiom["image_hash"], new_ocr_text)
+        await es_update_ocr_text(idiom["image_hash"], new_ocr_text)
+        print(f"processed {count} documents")
+        count += 1
 
 
 @get_ocr_result.handle()
@@ -275,8 +298,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 
 @approve_idiom.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
-    if event.get_user_id() not in ei_upload_whitelist:
-        await approve_idiom.finish(tips_no_permission)
+    # if event.get_user_id() not in ei_upload_whitelist:
+    #     await approve_idiom.finish(tips_no_permission)
     if len(args) == 0:
         await approve_idiom.finish("请输入要审核的ID。")
     image_hashes = str(args).split()
@@ -295,11 +318,41 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 
     await approve_idiom.finish("已审核。"+upload_ok_quote)
 
+@approve_batch_idioms.handle()
+# 获取待审核列表ID，并全部通过
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    if event.get_user_id() not in ["1763471048"]:
+        await approve_batch_idioms.finish(tips_no_permission)
+    approve_count = 0
+    if len(args) == 0:
+        await approve_batch_idioms.send("未指定数量，默认为20。")
+        approve_count = 20
+    else:
+        approve_count = int(str(args[0]))
+    
+    idiom_list = await get_under_review_idioms(approve_count)
+    image_hashes = [idiom['image_hash'] for idiom in idiom_list]
+    # cut image_hashes length to approve_count
+    image_hashes = image_hashes[:approve_count]
+
+    for image_hash in image_hashes:
+        image_hash = await hash_extender(image_hash, event.group_id)
+        image_ext = await get_ext_by_image_hash(image_hash)
+        image_bytes = await ei_img_storage_download(f"{image_hash}.{image_ext}")
+        ocr_text = await get_ocr_text_cloud(image_bytes)
+        await update_review_status_by_image_hash(image_hash, False)
+        await es_update_review_status(image_hash, False)
+        await update_ocr_text_by_image_hash(image_hash, ocr_text)
+        await es_update_ocr_text(image_hash, ocr_text)
+
+    upload_ok_quote = await check_dedup(image_hashes, "", event.group_id)
+
+    await approve_batch_idioms.finish("OK")
 
 @reject_idiom.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
-    if event.get_user_id() not in ei_upload_whitelist:
-        await reject_idiom.finish(tips_no_permission)
+    # if event.get_user_id() not in ei_upload_whitelist:
+    #     await reject_idiom.finish(tips_no_permission)
     if len(args) == 0:
         await reject_idiom.finish("请输入要审核的ID。")
     image_hashes = str(args).split()
@@ -308,6 +361,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         uploader = await get_uploader_by_hash(image_hash)
         image_current_reviewing_status = await get_review_status_by_image_hash(image_hash)
         if image_current_reviewing_status == True:
+            if event.get_user_id() not in ei_upload_whitelist:
+                await reject_idiom.finish("您只有将已审核的图片标记为未审核的权限。")
             logger.info(
                 f"Rejected idiom {image_hash} is already rejected, so delete it instead.")
             image_ext = await get_ext_by_image_hash(image_hash)
@@ -326,8 +381,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 
 @review_list.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
-    if event.get_user_id() not in ei_upload_whitelist:
-        await review_list.finish(tips_no_permission)
+    # if event.get_user_id() not in ei_upload_whitelist:
+    #     await review_list.finish(tips_no_permission)
     idiom_list = await get_under_review_idioms()
     result = ""
     for idiom in idiom_list:
@@ -371,6 +426,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 3. 调取图片：调取 ID
 4. 审核列表：待审核列表(只取10条)
 """
+    ep_alias = await get_all_alias()
     ei_non_admin_help_msg = "剩下的都是管理员命令，不告诉你。"
     ep_alias_text = ""
     for k, v in ep_alias.items():
@@ -412,3 +468,67 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if parsed_args["com"] is not None:
         await edit_comment_by_image_hash(image_hash, parsed_args["com"])
     await edit.finish("编辑完成。")
+
+@add_cate.handle()
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    if event.get_user_id() not in ei_upload_whitelist:
+        await add_cate.finish(tips_no_permission)
+    if len(args) == 0:
+        await add_cate.finish("请输入要添加的分类。")
+    cate_user_id: list[str] = list()
+    cate_text: str = str()
+    for seg in args:
+        if seg.type == "at":
+            cate_user_id.append(seg.data["qq"])
+        if seg.type == "text":
+            cate_text += seg.data["text"]
+            cate_text += " "
+
+    if len(cate_user_id) == 0:
+        await add_cate.finish("请at分类对应的怡批。")
+    if len(cate_user_id) > 1:
+        await add_cate.finish("只能at一个怡批。")
+    
+    cate_alias = cate_text.split()
+    if len(cate_alias) == 0:
+        await add_cate.finish("请输入分类名。")
+    
+    cate_alias = list(set(cate_alias))
+    cate_alias = [i.strip() for i in cate_alias]
+    cate_alias = [i for i in cate_alias if i != ""]
+
+    cate_user_id = cate_user_id[0]
+    await mg_add_cate(cate_user_id, cate_alias)
+    await add_cate.finish("添加分类完成。")
+
+@append_cate.handle()
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    if event.get_user_id() not in ei_upload_whitelist:
+        await append_cate.finish(tips_no_permission)
+    if len(args) == 0:
+        await append_cate.finish("请输入要追加的分类。")
+    cate_user_id: list[str] = list()
+    cate_text: str = str()
+    for seg in args:
+        if seg.type == "at":
+            cate_user_id.append(seg.data["qq"])
+        if seg.type == "text":
+            cate_text += seg.data["text"]
+            cate_text += " "
+
+    if len(cate_user_id) == 0:
+        await append_cate.finish("请at分类对应的怡批。")
+    if len(cate_user_id) > 1:
+        await append_cate.finish("只能at一个怡批。")
+    
+    cate_alias = cate_text.split()
+    if len(cate_alias) == 0:
+        await append_cate.finish("请输入分类名。")
+    
+    cate_alias = list(set(cate_alias))
+    cate_alias = [i.strip() for i in cate_alias]
+    cate_alias = [i for i in cate_alias if i != ""]
+
+    cate_user_id = cate_user_id[0]
+    await mg_append_cate(cate_user_id, cate_alias)
+    await append_cate.finish("添加分类完成。")

@@ -13,3 +13,9 @@ def set_ratelimited(name, time):
 
 def get_ratelimited(name):
     return rd.get("RL_"+name)
+
+def set_group_name(name):
+    rd.set("GROUP_NAME", name)
+
+def get_group_name():
+    return rd.get("GROUP_NAME")

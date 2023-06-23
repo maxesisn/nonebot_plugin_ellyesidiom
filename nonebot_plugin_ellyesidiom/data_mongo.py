@@ -20,6 +20,7 @@ me_data = client.me_data
 idioms_data = ei_data.idioms.with_options(codec_options=codec_opt)
 greylist_data = ei_data.greylist.with_options(codec_options=codec_opt)
 cards_data = me_data.cards.with_options(codec_options=codec_opt)
+cate_data = ei_data.cate.with_options(codec_options=codec_opt)
 
 async def get_idiom_by_image_hash(image_hash: str) -> dict:
     return idioms_data.find_one({"image_hash": image_hash})
@@ -77,8 +78,8 @@ async def update_review_status_by_image_hash(image_hash: str, under_review: bool
 async def get_review_status_by_image_hash(image_hash: str) -> bool:
     return idioms_data.find_one({"image_hash": image_hash})["under_review"]
 
-async def get_under_review_idioms() -> list[dict]:
-    return idioms_data.find({"under_review": True}).limit(10)
+async def get_under_review_idioms(limit: 10) -> list[dict]:
+    return idioms_data.find({"under_review": True}).limit(limit)
 
 async def check_ocr_text_exists(ocr_text: list[str]) -> bool:
     return idioms_data.count_documents({"ocr_text": ocr_text}) > 0
@@ -120,7 +121,8 @@ async def get_uploader_rank() -> list[dict]:
     return idioms_data.aggregate([
         {"$match": {"under_review": False, "uploader.platform": {"$eq": "qq"}}},
         {"$group": {"_id": "$uploader.id", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}}
+        {"$sort": {"count": -1}},
+        {"$limit": 10}
     ])
 
 
@@ -151,3 +153,17 @@ async def greylist_incr(user_id:str, platform:str) -> int:
         {"$inc": {"count": 1}},
         upsert=True
     ).modified_count
+
+async def add_cate(id: str, alias: list[str]) -> None:
+    cate_data.update_one({"id": id}, {"$set": {"alias": alias}}, upsert=True)
+
+async def append_cate(id: str, alias: list[str]) -> None:
+    # merge new alias into old alias
+    cate_data.update_one({"id": id}, {"$addToSet": {"alias": {"$each": alias}}}, upsert=True)
+
+async def get_all_alias() -> dict:
+    # get all alias in cate and merge them into one dict
+    alias = {}
+    for cate in cate_data.find():
+        alias[cate["id"]] = cate["alias"]
+    return alias
